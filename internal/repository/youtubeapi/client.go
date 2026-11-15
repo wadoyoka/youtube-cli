@@ -274,36 +274,14 @@ func (w *sendWatch) maybeCreated(err error) bool {
 // playlistParts は、再生リストを引くときに頼む部分（名前と説明、公開範囲、動画の数）。
 var playlistParts = []string{"snippet", "status", "contentDetails"}
 
-// ListMyPlaylists は、ログイン中のチャンネルの再生リストを、全ページ分返す。
+// ListMyPlaylists は、ログイン中のチャンネルの再生リストを、1回に pageSize 件ずつ、全ページ分返す。
 func (c *Client) ListMyPlaylists(ctx context.Context) ([]domain.Playlist, error) {
-	return c.listPlaylists(ctx, func() *youtube.PlaylistsListCall {
-		return c.svc.Playlists.List(playlistParts).Mine(true)
-	})
-}
-
-// GetPlaylists は、ID の再生リストを50件ずつ引いて返す。見つからない ID は結果に入れない。
-func (c *Client) GetPlaylists(ctx context.Context, ids []string) ([]domain.Playlist, error) {
-	var playlists []domain.Playlist
-	for batch := range slices.Chunk(ids, pageSize) {
-		got, err := c.listPlaylists(ctx, func() *youtube.PlaylistsListCall {
-			return c.svc.Playlists.List(playlistParts).Id(batch...)
-		})
-		if err != nil {
-			return nil, err
-		}
-		playlists = append(playlists, got...)
-	}
-	return playlists, nil
-}
-
-// listPlaylists は、newCall で作った Playlists.List を、1回に pageSize 件ずつ、全ページ分たどる。
-func (c *Client) listPlaylists(ctx context.Context, newCall func() *youtube.PlaylistsListCall) ([]domain.Playlist, error) {
 	var playlists []domain.Playlist
 	pageToken := ""
 	for {
 		var resp *youtube.PlaylistListResponse
 		err := c.do(ctx, func() (err error) {
-			resp, err = newCall().MaxResults(pageSize).PageToken(pageToken).Context(ctx).Do()
+			resp, err = c.svc.Playlists.List(playlistParts).Mine(true).MaxResults(pageSize).PageToken(pageToken).Context(ctx).Do()
 			return err
 		})
 		if err != nil {
@@ -317,6 +295,26 @@ func (c *Client) listPlaylists(ctx context.Context, newCall func() *youtube.Play
 		}
 		pageToken = resp.NextPageToken
 	}
+}
+
+// GetPlaylists は、ID の再生リストを50件ずつ引いて返す。見つからない ID は結果に入れない。
+// GetVideos と同じく、ID で引くときは maxResults と pageToken を送らない。
+func (c *Client) GetPlaylists(ctx context.Context, ids []string) ([]domain.Playlist, error) {
+	var playlists []domain.Playlist
+	for batch := range slices.Chunk(ids, pageSize) {
+		var resp *youtube.PlaylistListResponse
+		err := c.do(ctx, func() (err error) {
+			resp, err = c.svc.Playlists.List(playlistParts).Id(batch...).Context(ctx).Do()
+			return err
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, it := range resp.Items {
+			playlists = append(playlists, toPlaylist(it))
+		}
+	}
+	return playlists, nil
 }
 
 func toPlaylist(it *youtube.Playlist) domain.Playlist {

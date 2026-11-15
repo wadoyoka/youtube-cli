@@ -172,8 +172,8 @@ func TestGetVideos(t *testing.T) {
 		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 			ids := r.URL.Query()["id"]
 			batches = append(batches, len(ids))
-			if strings.Join(r.URL.Query()["part"], ",") != "snippet,status" {
-				t.Errorf("part = %v", r.URL.Query()["part"])
+			if q := r.URL.Query(); strings.Join(q["part"], ",") != "snippet,status" || q.Has("maxResults") || q.Has("pageToken") {
+				t.Errorf("ID で引くときは maxResults と pageToken を送らない: query = %v", q)
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{map[string]any{
@@ -744,8 +744,8 @@ func TestGetPlaylists(t *testing.T) {
 		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 			q := r.URL.Query()
 			batches = append(batches, len(q["id"]))
-			if strings.Join(q["part"], ",") != "snippet,status,contentDetails" || q.Get("mine") != "" {
-				t.Errorf("query=%v", q)
+			if strings.Join(q["part"], ",") != "snippet,status,contentDetails" || q.Has("mine") || q.Has("maxResults") || q.Has("pageToken") {
+				t.Errorf("ID で引くときは mine・maxResults・pageToken を送らない: query=%v", q)
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{playlistJSON(q["id"][0], "A", "", "unlisted", 1)}})
