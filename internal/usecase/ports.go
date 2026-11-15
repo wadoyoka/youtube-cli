@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 
+	"github.com/wadoyoka/youtube-cli/internal/domain"
 	"github.com/wadoyoka/youtube-cli/internal/domain/policy"
 )
 
@@ -51,6 +52,25 @@ type Authenticator interface {
 	Logout(ctx context.Context) error
 	HasToken() bool
 	Inspect() (AuthInspection, error)
+	// SnapshotToken は、今の token.enc の中身を覚える。restore を呼ぶと、その中身に書き戻す（なかったときは消す）。
+	// login のあとでチャンネルが違うと分かったとき、新しいトークンを取り消すために使う。
+	SnapshotToken() (restore func() error, err error)
+}
+
+// YouTube は、usecase が使う YouTube の操作。
+type YouTube interface {
+	// MyChannel は、ログイン中のチャンネルを返す。チャンネルがなければ KindSetup。
+	MyChannel(ctx context.Context) (domain.Channel, error)
+}
+
+// YouTubeOpener は、保存済みのトークンで YouTube を開く。
+type YouTubeOpener func(ctx context.Context) (YouTube, error)
+
+// StateStore は、state.json の置き場。
+type StateStore interface {
+	// Channel は、保存したチャンネルを返す。なければ found=false。
+	Channel() (ch domain.Channel, found bool, err error)
+	SetChannel(ch domain.Channel) error
 }
 
 // Locker は、ほかの youtube-cli と同時に書き込まないための排他ロック。

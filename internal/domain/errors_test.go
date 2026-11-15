@@ -21,6 +21,7 @@ func TestErrorKind(t *testing.T) {
 			{KindConflict, 5, "conflict"},
 			{KindAmbiguous, 6, "ambiguous"},
 			{KindDenied, 7, "denied"},
+			{KindQuota, 8, "quota"},
 		}
 
 		for _, c := range cases {

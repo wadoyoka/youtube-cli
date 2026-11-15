@@ -16,6 +16,8 @@ type Auth struct {
 	KeyStore    string
 	Problem     string
 	InspErr     error
+	SnapshotErr error  // SnapshotToken が返すエラー
+	Snapshots   int    // SnapshotToken を呼んだ回数
 	ProjectID   string // Inspect が返す、取り込み済みの client_secret の project_id
 
 	// ClientSecretProjectID の偽物。
@@ -69,4 +71,18 @@ func (a *Auth) Inspect() (usecase.AuthInspection, error) {
 		insp.ProjectID = a.ProjectID
 	}
 	return insp, a.InspErr
+}
+
+// SnapshotToken は、Snapshots を数え、呼ぶと "restore" を Calls に記録して TokenSaved を戻す restore を返す。
+func (a *Auth) SnapshotToken() (func() error, error) {
+	a.Snapshots++
+	if a.SnapshotErr != nil {
+		return nil, a.SnapshotErr
+	}
+	before := a.TokenSaved
+	return func() error {
+		a.Calls = append(a.Calls, "restore")
+		a.TokenSaved = before
+		return nil
+	}, nil
 }

@@ -25,6 +25,8 @@ const (
 	KindAmbiguous
 	// KindDenied は、拒否された（終了コード 7）。
 	KindDenied
+	// KindQuota は、YouTube API の割り当て（クォータ）を使い切った（終了コード 8）。
+	KindQuota
 )
 
 var kindNames = [...]string{
@@ -35,6 +37,7 @@ var kindNames = [...]string{
 	KindConflict:   "conflict",
 	KindAmbiguous:  "ambiguous",
 	KindDenied:     "denied",
+	KindQuota:      "quota",
 }
 
 // ExitCode は、この種類に対応するプロセスの終了コードを返す。
