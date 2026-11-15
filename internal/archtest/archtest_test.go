@@ -78,7 +78,7 @@ func TestRepositoryFollowsArchitecture(t *testing.T) {
 		}
 	})
 
-	t.Run("本体のコードが削除と共有の API を呼んでいない", func(t *testing.T) {
+	t.Run("本体のコードが削除・更新の API を呼ばず、公開範囲に限定公開以外を送っていない", func(t *testing.T) {
 		// Arrange
 		root := "../.."
 
@@ -89,7 +89,7 @@ func TestRepositoryFollowsArchitecture(t *testing.T) {
 			t.Fatalf("ForbiddenCalls(%q) がエラーを返しました: %v", root, err)
 		}
 		if len(got) > 0 {
-			t.Errorf("本体のコードに、削除・ゴミ箱・共有の API の呼び出しがあります:\n%s", strings.Join(got, "\n"))
+			t.Errorf("本体のコードに、削除・更新の API の呼び出し、または限定公開以外の公開範囲を送る形があります:\n%s", strings.Join(got, "\n"))
 		}
 	})
 }

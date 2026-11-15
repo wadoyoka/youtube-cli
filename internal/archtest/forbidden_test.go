@@ -1,6 +1,7 @@
 package archtest
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -15,7 +16,11 @@ func TestForbiddenCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ForbiddenCalls(%q) がエラーを返しました: %v", root, err)
 	}
-	wantPrefixes := []string{"a.go:20: ", "a.go:21: ", "a.go:22: ", "a.go:23: ", "a.go:25: "}
+	// 9〜22 行目が禁止する API、26〜33 行目が PrivacyStatus へ unlisted 以外を入れる形。
+	var wantPrefixes []string
+	for _, line := range []int{9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 26, 27, 28, 30, 31, 33} {
+		wantPrefixes = append(wantPrefixes, fmt.Sprintf("a.go:%d: ", line))
+	}
 	if len(got) != len(wantPrefixes) {
 		t.Fatalf("ForbiddenCalls(%q) は %d 件のはずが %d 件でした（_test.go は数えない）: %q", root, len(wantPrefixes), len(got), got)
 	}
