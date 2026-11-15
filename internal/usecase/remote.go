@@ -11,6 +11,7 @@ type Remote struct {
 	Open   YouTubeOpener
 	State  StateStore
 	Locker Locker
+	Ledger Ledger
 }
 
 // Session は、接続した YouTube と、そのチャンネル。

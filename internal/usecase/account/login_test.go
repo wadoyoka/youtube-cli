@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/wadoyoka/youtube-cli/internal/domain"
@@ -17,12 +18,17 @@ var (
 )
 
 func newLogin(a *usecasetest.Auth, yt *usecasetest.YouTube, st *usecasetest.State) Login {
+	return newLoginWithLedger(a, yt, st, &usecasetest.Ledger{})
+}
+
+func newLoginWithLedger(a *usecasetest.Auth, yt *usecasetest.YouTube, st *usecasetest.State, l *usecasetest.Ledger) Login {
 	return Login{
 		Auth: a,
 		Remote: usecase.Remote{
 			Open:   usecasetest.Opener(yt),
 			State:  st,
 			Locker: &usecasetest.Locker{},
+			Ledger: l,
 		},
 	}
 }
@@ -105,7 +111,86 @@ func TestLogin(t *testing.T) {
 		}
 	})
 
-	t.Run("チャンネルがないアカウントは KindSetup", func(t *testing.T) {
+	t.Run("違うチャンネルでも SwitchChannel なら保存し直し、ledger を空にする", func(t *testing.T) {
+		// Arrange
+		a := &usecasetest.Auth{SecretSaved: true}
+		st := &usecasetest.State{Saved: chanA, Found: true}
+		l := &usecasetest.Ledger{VideoList: []usecase.LedgerVideo{{ID: "v1"}}}
+		u := newLoginWithLedger(a, &usecasetest.YouTube{Channel: chanB}, st, l)
+
+		// Act
+		_, err := u.Run(context.Background(), LoginInput{SwitchChannel: true})
+
+		// Assert
+		if err != nil || st.Saved != chanB || l.Clears != 1 || len(l.VideoList) != 0 {
+			t.Errorf("err=%v saved=%+v clears=%d videos=%v", err, st.Saved, l.Clears, l.VideoList)
+		}
+	})
+
+	t.Run("同じチャンネルや拒否した切り替えでは ledger を消さない", func(t *testing.T) {
+		// Arrange
+		l := &usecasetest.Ledger{}
+		same := newLoginWithLedger(&usecasetest.Auth{SecretSaved: true}, &usecasetest.YouTube{Channel: chanA}, &usecasetest.State{Saved: chanA, Found: true}, l)
+		refused := newLoginWithLedger(&usecasetest.Auth{SecretSaved: true}, &usecasetest.YouTube{Channel: chanB}, &usecasetest.State{Saved: chanA, Found: true}, l)
+
+		// Act
+		_, err1 := same.Run(context.Background(), LoginInput{SwitchChannel: true})
+		_, err2 := refused.Run(context.Background(), LoginInput{})
+
+		// Assert
+		if err1 != nil || domain.KindOf(err2) != domain.KindConflict || l.Clears != 0 {
+			t.Errorf("err1=%v err2=%v clears=%d", err1, err2, l.Clears)
+		}
+	})
+
+	t.Run("MyChannel が失敗したら token を元に戻す", func(t *testing.T) {
+		// Arrange
+		boom := errors.New("quota")
+		a := &usecasetest.Auth{SecretSaved: true}
+		u := newLogin(a, &usecasetest.YouTube{ChannelErr: boom}, &usecasetest.State{})
+
+		// Act
+		_, err := u.Run(context.Background(), LoginInput{})
+
+		// Assert
+		if !errors.Is(err, boom) || !slices.Contains(a.Calls, "restore") || a.TokenSaved {
+			t.Errorf("err=%v calls=%v token=%v", err, a.Calls, a.TokenSaved)
+		}
+	})
+
+	t.Run("YouTube を開けなかったら token を元に戻す", func(t *testing.T) {
+		// Arrange
+		boom := errors.New("open")
+		a := &usecasetest.Auth{SecretSaved: true}
+		u := newLogin(a, &usecasetest.YouTube{}, &usecasetest.State{})
+		u.Remote.Open = func(context.Context) (usecase.YouTube, error) { return nil, boom }
+
+		// Act
+		_, err := u.Run(context.Background(), LoginInput{})
+
+		// Assert
+		if !errors.Is(err, boom) || !slices.Contains(a.Calls, "restore") {
+			t.Errorf("err=%v calls=%v", err, a.Calls)
+		}
+	})
+
+	t.Run("元に戻すのにも失敗したら両方を伝える", func(t *testing.T) {
+		// Arrange
+		boom := errors.New("quota")
+		rboom := errors.New("restore-failed")
+		a := &usecasetest.Auth{SecretSaved: true, RestoreErr: rboom}
+		u := newLogin(a, &usecasetest.YouTube{ChannelErr: boom}, &usecasetest.State{})
+
+		// Act
+		_, err := u.Run(context.Background(), LoginInput{})
+
+		// Assert
+		if err == nil || !errors.Is(err, boom) || !strings.Contains(err.Error(), "restore-failed") {
+			t.Errorf("err = %v", err)
+		}
+	})
+
+	t.Run("チャンネルがないアカウントは KindSetup で token を元に戻す", func(t *testing.T) {
 		// Arrange
 		a := &usecasetest.Auth{SecretSaved: true}
 		noChannel := domain.Errorf(domain.KindSetup, "チャンネルがありません")
@@ -115,8 +200,8 @@ func TestLogin(t *testing.T) {
 		_, err := u.Run(context.Background(), LoginInput{})
 
 		// Assert
-		if domain.KindOf(err) != domain.KindSetup {
-			t.Errorf("err = %v", err)
+		if domain.KindOf(err) != domain.KindSetup || !slices.Contains(a.Calls, "restore") || a.TokenSaved {
+			t.Errorf("err=%v calls=%v token=%v", err, a.Calls, a.TokenSaved)
 		}
 	})
 

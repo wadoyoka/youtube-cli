@@ -61,19 +61,28 @@ func (u Login) Run(ctx context.Context, in LoginInput) (LoginResult, error) {
 	if err := u.Auth.Login(ctx, usecase.LoginOptions{NoBrowser: in.NoBrowser, Prompt: in.Prompt, Input: in.Input}); err != nil {
 		return LoginResult{}, err
 	}
+	// Login がトークンを書き換えたあと、チャンネルを確かめて保存するまでの失敗では、確かめていないトークンを残さない。
 	yt, err := u.Remote.Open(ctx)
 	if err != nil {
-		return LoginResult{}, err
+		return LoginResult{}, restoreAfter(err, restore)
 	}
 	ch, err := yt.MyChannel(ctx)
 	if err != nil {
-		return LoginResult{}, err
+		return LoginResult{}, restoreAfter(err, restore)
 	}
 	warnings, err := u.saveChannel(ctx, ch, in.SwitchChannel, restore)
 	if err != nil {
 		return LoginResult{}, err
 	}
 	return LoginResult{ChannelID: ch.ID, ChannelTitle: ch.Title, ChannelURL: ch.URL(), Warnings: warnings}, nil
+}
+
+// restoreAfter は、restore してから cause を返す。restore も失敗したら、両方を伝える。
+func restoreAfter(cause error, restore func() error) error {
+	if rerr := restore(); rerr != nil {
+		return fmt.Errorf("%w（元のログインに戻せませんでした: %w）", cause, rerr)
+	}
+	return cause
 }
 
 // saveChannel は、ch を保存する。違うチャンネルが保存済みで switchChannel でなければ、restore してから KindConflict を返す。
@@ -102,6 +111,12 @@ func (u Login) saveChannel(ctx context.Context, ch domain.Channel, switchChannel
 	}
 	if !found || saved != ch {
 		if err := u.Remote.State.SetChannel(ch); err != nil {
+			return nil, err
+		}
+	}
+	// 記録は前のチャンネルのものなので、切り替えたら捨てる。
+	if found && saved.ID != ch.ID && u.Remote.Ledger != nil {
+		if err := u.Remote.Ledger.Clear(); err != nil {
 			return nil, err
 		}
 	}

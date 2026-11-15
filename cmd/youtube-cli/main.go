@@ -44,6 +44,7 @@ func run(ctx context.Context) int {
 		Open:   youtubeapi.NewOpener(authn),
 		State:  config.NewStateFile(dir),
 		Locker: config.NewLockFile(dir),
+		Ledger: config.NewLedgerFile(dir),
 	}
 	login := account.Login{Auth: authn, Remote: remote}
 	status := account.Status{Dir: configDir, Auth: authn, Remote: remote}

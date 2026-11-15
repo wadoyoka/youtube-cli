@@ -17,6 +17,7 @@ type Auth struct {
 	Problem     string
 	InspErr     error
 	SnapshotErr error  // SnapshotToken が返すエラー
+	RestoreErr  error  // SnapshotToken が返す restore が返すエラー
 	Snapshots   int    // SnapshotToken を呼んだ回数
 	ProjectID   string // Inspect が返す、取り込み済みの client_secret の project_id
 
@@ -83,6 +84,6 @@ func (a *Auth) SnapshotToken() (func() error, error) {
 	return func() error {
 		a.Calls = append(a.Calls, "restore")
 		a.TokenSaved = before
-		return nil
+		return a.RestoreErr
 	}, nil
 }

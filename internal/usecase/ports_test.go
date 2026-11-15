@@ -17,6 +17,7 @@ func TestFakesSatisfyPorts(t *testing.T) {
 			"YouTube":       (*usecasetest.YouTube)(nil),
 			"StateStore":    (*usecasetest.State)(nil),
 			"Locker":        (*usecasetest.Locker)(nil),
+			"Ledger":        (*usecasetest.Ledger)(nil),
 		}
 
 		// Act / Assert
@@ -35,6 +36,8 @@ func TestFakesSatisfyPorts(t *testing.T) {
 				_, ok = fake.(usecase.StateStore)
 			case "Locker":
 				_, ok = fake.(usecase.Locker)
+			case "Ledger":
+				_, ok = fake.(usecase.Ledger)
 			}
 			if !ok {
 				t.Errorf("%s の偽物がポートを満たしません", name)

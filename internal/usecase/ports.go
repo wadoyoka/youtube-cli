@@ -5,6 +5,7 @@ package usecase
 import (
 	"context"
 	"io"
+	"time"
 
 	"github.com/wadoyoka/youtube-cli/internal/domain"
 	"github.com/wadoyoka/youtube-cli/internal/domain/policy"
@@ -71,6 +72,34 @@ type StateStore interface {
 	// Channel は、保存したチャンネルを返す。なければ found=false。
 	Channel() (ch domain.Channel, found bool, err error)
 	SetChannel(ch domain.Channel) error
+}
+
+// LedgerVideo は、この PC で上げた動画の記録。
+type LedgerVideo struct {
+	ID         string    `json:"id"`
+	Title      string    `json:"title"`
+	Size       int64     `json:"size"`
+	UploadedAt time.Time `json:"uploadedAt"`
+}
+
+// LedgerPlaylist は、この PC で作った再生リストの記録。
+type LedgerPlaylist struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
+// Ledger は、この PC で上げた動画と作った再生リストの手元の記録。
+// YouTube の一覧 API は作った直後のものを返すのが遅れることがあるため、その穴を埋めるために持つ。
+// 読み書きは Locker で囲む。
+type Ledger interface {
+	Videos() ([]LedgerVideo, error)
+	// AddVideo は、動画を記録する。同じ ID が記録済みなら何もしない。
+	AddVideo(v LedgerVideo) error
+	Playlists() ([]LedgerPlaylist, error)
+	// AddPlaylist は、再生リストを記録する。同じ ID が記録済みなら何もしない。
+	AddPlaylist(p LedgerPlaylist) error
+	// Clear は、記録をすべて消す。チャンネルを切り替えたときに使う。
+	Clear() error
 }
 
 // Locker は、ほかの youtube-cli と同時に書き込まないための排他ロック。

@@ -53,3 +53,45 @@ func (l *Locker) Lock(context.Context) (func(), error) {
 	l.Locks++
 	return func() {}, nil
 }
+
+// Ledger は、メモリ上の Ledger。
+type Ledger struct {
+	VideoList    []usecase.LedgerVideo
+	PlaylistList []usecase.LedgerPlaylist
+	Clears       int // Clear を呼んだ回数
+}
+
+// Videos は、記録した動画を返す。
+func (l *Ledger) Videos() ([]usecase.LedgerVideo, error) { return l.VideoList, nil }
+
+// AddVideo は、同じ ID がなければ動画を足す。
+func (l *Ledger) AddVideo(v usecase.LedgerVideo) error {
+	for _, x := range l.VideoList {
+		if x.ID == v.ID {
+			return nil
+		}
+	}
+	l.VideoList = append(l.VideoList, v)
+	return nil
+}
+
+// Playlists は、記録した再生リストを返す。
+func (l *Ledger) Playlists() ([]usecase.LedgerPlaylist, error) { return l.PlaylistList, nil }
+
+// AddPlaylist は、同じ ID がなければ再生リストを足す。
+func (l *Ledger) AddPlaylist(p usecase.LedgerPlaylist) error {
+	for _, x := range l.PlaylistList {
+		if x.ID == p.ID {
+			return nil
+		}
+	}
+	l.PlaylistList = append(l.PlaylistList, p)
+	return nil
+}
+
+// Clear は、記録を空にして、回数を数える。
+func (l *Ledger) Clear() error {
+	l.VideoList, l.PlaylistList = nil, nil
+	l.Clears++
+	return nil
+}
