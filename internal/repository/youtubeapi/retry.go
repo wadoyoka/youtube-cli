@@ -9,7 +9,10 @@ import (
 	"net/url"
 	"time"
 
+	"golang.org/x/oauth2"
 	"google.golang.org/api/googleapi"
+
+	"github.com/wadoyoka/youtube-cli/internal/domain"
 )
 
 // isRetryable は、やり直せる失敗かどうかを返す。
@@ -44,6 +47,23 @@ func isRateLimited(err error) bool {
 		}
 	}
 	return false
+}
+
+// mayHaveCreated は、何かを作る要求（再生リストを作る、再生リストに入れる）が err で失敗したとき、YouTube で作られたかもしれないかを返す。
+// 作られていないと言い切れるのは、YouTube が 4xx で断ったとき（混み合い、クォータ切れ、見つからないなど）と、
+// トークンを更新できないなどで要求を送れなかったとき（oauth2.RetrieveError、domain.Error）だけ。
+// 5xx、通信の失敗、そのほかの分からない失敗は、作られたかもしれない側に倒す。
+func mayHaveCreated(err error) bool {
+	if gerr, ok := errors.AsType[*googleapi.Error](err); ok {
+		return gerr.Code < 400 || gerr.Code >= 500
+	}
+	if _, ok := errors.AsType[*oauth2.RetrieveError](err); ok {
+		return false
+	}
+	if _, ok := errors.AsType[*domain.Error](err); ok {
+		return false
+	}
+	return true
 }
 
 // isNetworkError は、やり直してよい通信の失敗（時間切れ、接続のリセット、途中で切れた応答など）かどうかを返す。

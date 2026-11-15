@@ -35,12 +35,10 @@ func mapError(err error) error {
 	return domain.Errorf(domain.KindUnexpected, "YouTube の操作に失敗しました").Wrap(err)
 }
 
-// isQuotaExceeded は、1日の割り当てやアップロード数の上限を使い切った失敗（403）かどうかを返す。
+// isQuotaExceeded は、1日の割り当てやアップロード数の上限を使い切った失敗かどうかを、状態コードによらず理由で返す。
+// 多くは 403 で返るが、videos.insert の uploadLimitExceeded は 400（badRequest）で返る。
 // 短い間の混み合い（rateLimitExceeded など）は含まない。それはやり直せば通る。
 func isQuotaExceeded(gerr *googleapi.Error) bool {
-	if gerr.Code != http.StatusForbidden {
-		return false
-	}
 	for _, e := range gerr.Errors {
 		switch e.Reason {
 		case "quotaExceeded", "uploadLimitExceeded", "dailyLimitExceeded":

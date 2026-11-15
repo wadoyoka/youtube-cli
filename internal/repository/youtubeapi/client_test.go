@@ -336,6 +336,11 @@ func newUploadClient(t *testing.T, s *uploadServer) (*Client, *[]time.Duration) 
 	return c, slept
 }
 
+// roundTripFunc は、関数で応える http.RoundTripper。本物の通信を通らないので、net/http/httptrace の見張りは呼ばれない。
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
 // onlyReader は、io.Seeker を隠した Reader。
 type onlyReader struct{ r io.Reader }
 
@@ -551,6 +556,66 @@ func TestInsertVideo(t *testing.T) {
 		}
 		if len(s.startReqs()) != 1 {
 			t.Errorf("要求=%d", len(s.startReqs()))
+		}
+	})
+
+	t.Run("400（badRequest）で返った uploadLimitExceeded も KindQuota で、送り直さない", func(t *testing.T) {
+		// Arrange
+		s := &uploadServer{starts: []http.HandlerFunc{refused(http.StatusBadRequest, "uploadLimitExceeded"), created("dup")}}
+		c, slept := newUploadClient(t, s)
+
+		// Act
+		_, err := c.InsertVideo(context.Background(), meta, strings.NewReader(small), int64(len(small)), nil)
+
+		// Assert
+		if domain.KindOf(err) != domain.KindQuota || errors.Is(err, domain.ErrUploadUncertain) {
+			t.Errorf("err=%v kind=%v", err, domain.KindOf(err))
+		}
+		if len(s.startReqs()) != 1 || len(*slept) != 0 {
+			t.Errorf("要求=%d slept=%v", len(s.startReqs()), *slept)
+		}
+	})
+
+	t.Run("要求を書いた記録がなくても YouTube の応答があれば、送り直さずに ErrUploadUncertain を返す", func(t *testing.T) {
+		for _, code := range []int{http.StatusTooManyRequests, http.StatusServiceUnavailable} {
+			// Arrange
+			// 要求を書いたことを net/http/httptrace に知らせない偽の通信。見張りが要求を見落としたときを真似る。
+			var calls atomic.Int32
+			rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				calls.Add(1)
+				if r.Body != nil {
+					_, _ = io.Copy(io.Discard, r.Body)
+					_ = r.Body.Close()
+				}
+				reason := "backendError"
+				if code == http.StatusTooManyRequests {
+					reason = "rateLimitExceeded"
+				}
+				return &http.Response{
+					StatusCode: code,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(fmt.Sprintf(`{"error":{"code":%d,"message":"x","errors":[{"reason":%q,"message":"x"}]}}`, code, reason))),
+					Request:    r,
+				}, nil
+			})
+			svc, err := youtube.NewService(context.Background(), option.WithHTTPClient(&http.Client{Transport: rt}), option.WithEndpoint("http://youtube.invalid/"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := NewClient(svc)
+			var slept []time.Duration
+			c.sleep = func(d time.Duration) { slept = append(slept, d) }
+
+			// Act
+			_, err = c.InsertVideo(context.Background(), meta, strings.NewReader(small), int64(len(small)), nil)
+
+			// Assert
+			if !errors.Is(err, domain.ErrUploadUncertain) {
+				t.Errorf("%d: err=%v", code, err)
+			}
+			if calls.Load() != 1 || len(slept) != 0 {
+				t.Errorf("%d: 送り直さないはず: 要求=%d slept=%v", code, calls.Load(), slept)
+			}
 		}
 	})
 
@@ -858,17 +923,36 @@ func TestCreatePlaylist(t *testing.T) {
 		}
 	})
 
-	t.Run("503 は作られたかもしれないので送り直さない", func(t *testing.T) {
+	t.Run("503 や通信の失敗は作られたかもしれないので送り直さず、playlist ls で確かめるよう案内する", func(t *testing.T) {
+		for name, fail := range map[string]http.HandlerFunc{"503": refused(http.StatusServiceUnavailable, "backendError"), "接続が切れた": hangUp} {
+			// Arrange
+			s := &playlistServer{responds: []http.HandlerFunc{fail, respondJSON(playlistJSON("PLnew", "A", "[youtube-cli]", "unlisted", 0))}}
+			c := newTestClient(t, s.handle)
+
+			// Act
+			_, err := c.CreatePlaylist(context.Background(), "A", "")
+
+			// Assert
+			if err == nil || len(s.got) != 1 {
+				t.Errorf("%s: err=%v 要求=%d", name, err, len(s.got))
+			}
+			if domain.KindOf(err) != domain.KindUnexpected || !strings.Contains(err.Error(), "できているかもしれません") || !strings.Contains(err.Error(), "`youtube-cli playlist ls`") {
+				t.Errorf("%s: err=%v", name, err)
+			}
+		}
+	})
+
+	t.Run("4xx で断られたら何も作られていないので、確かめる案内は出さない", func(t *testing.T) {
 		// Arrange
-		s := &playlistServer{responds: []http.HandlerFunc{refused(http.StatusServiceUnavailable, "backendError"), respondJSON(playlistJSON("PLnew", "A", "[youtube-cli]", "unlisted", 0))}}
+		s := &playlistServer{responds: []http.HandlerFunc{refused(http.StatusBadRequest, "invalidPlaylistSnippet")}}
 		c := newTestClient(t, s.handle)
 
 		// Act
 		_, err := c.CreatePlaylist(context.Background(), "A", "")
 
 		// Assert
-		if err == nil || len(s.got) != 1 {
-			t.Errorf("err=%v 要求=%d", err, len(s.got))
+		if err == nil || strings.Contains(err.Error(), "playlist ls") {
+			t.Errorf("err=%v", err)
 		}
 	})
 }
@@ -903,17 +987,35 @@ func TestAddToPlaylist(t *testing.T) {
 		}
 	})
 
-	t.Run("503 は入ったかもしれないので送り直さない", func(t *testing.T) {
+	t.Run("503 や通信の失敗は入ったかもしれないので送り直さず、ls --playlist で確かめるよう案内する", func(t *testing.T) {
+		for name, fail := range map[string]http.HandlerFunc{"503": refused(http.StatusServiceUnavailable, "backendError"), "接続が切れた": hangUp} {
+			// Arrange
+			s := &playlistServer{responds: []http.HandlerFunc{fail, respondJSON(map[string]any{"id": "item1"})}}
+			c := newTestClient(t, s.handle)
+
+			// Act
+			err := c.AddToPlaylist(context.Background(), "PL1", "vid1")
+
+			// Assert
+			if err == nil || len(s.got) != 1 {
+				t.Errorf("%s: err=%v 要求=%d", name, err, len(s.got))
+			}
+			if domain.KindOf(err) != domain.KindUnexpected || !strings.Contains(err.Error(), "入っているかもしれません") || !strings.Contains(err.Error(), "`youtube-cli ls --playlist PL1`") {
+				t.Errorf("%s: err=%v", name, err)
+			}
+		}
+	})
+
+	t.Run("429 で断られ続けたら何も入っていないので、確かめる案内は出さない", func(t *testing.T) {
 		// Arrange
-		s := &playlistServer{responds: []http.HandlerFunc{refused(http.StatusServiceUnavailable, "backendError"), respondJSON(map[string]any{"id": "item1"})}}
-		c := newTestClient(t, s.handle)
+		c := newTestClient(t, refused(http.StatusTooManyRequests, "rateLimitExceeded"))
 
 		// Act
 		err := c.AddToPlaylist(context.Background(), "PL1", "vid1")
 
 		// Assert
-		if err == nil || len(s.got) != 1 {
-			t.Errorf("err=%v 要求=%d", err, len(s.got))
+		if err == nil || strings.Contains(err.Error(), "ls --playlist") {
+			t.Errorf("err=%v", err)
 		}
 	})
 

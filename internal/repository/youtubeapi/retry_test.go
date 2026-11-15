@@ -11,7 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/oauth2"
 	"google.golang.org/api/googleapi"
+
+	"github.com/wadoyoka/youtube-cli/internal/domain"
 )
 
 type timeoutErr struct{}
@@ -49,6 +52,35 @@ func TestIsRetryable(t *testing.T) {
 			// Assert
 			if got != tc.want {
 				t.Errorf("isRetryable = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMayHaveCreated(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"500番台は作られたかもしれない", &googleapi.Error{Code: 503}, true},
+		{"応答の前に接続が閉じられたら作られたかもしれない", &url.Error{Op: "Post", URL: "x", Err: io.EOF}, true},
+		{"中断も作られたかもしれない", &url.Error{Op: "Post", URL: "x", Err: context.Canceled}, true},
+		{"分からない失敗も作られたかもしれない", errors.New("x"), true},
+		{"429 は作られていない", &googleapi.Error{Code: 429}, false},
+		{"403 のクォータ切れは作られていない", &googleapi.Error{Code: 403, Errors: []googleapi.ErrorItem{{Reason: "quotaExceeded"}}}, false},
+		{"404 は作られていない", &googleapi.Error{Code: 404}, false},
+		{"トークンを更新できなければ送っていない", &url.Error{Op: "Post", URL: "x", Err: &oauth2.RetrieveError{ErrorCode: "invalid_grant"}}, false},
+		{"鍵を読めないなど domain のエラーなら送っていない", &url.Error{Op: "Post", URL: "x", Err: domain.Errorf(domain.KindSetup, "鍵がありません")}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			// Act
+			got := mayHaveCreated(tc.err)
+			// Assert
+			if got != tc.want {
+				t.Errorf("mayHaveCreated = %v, want %v", got, tc.want)
 			}
 		})
 	}

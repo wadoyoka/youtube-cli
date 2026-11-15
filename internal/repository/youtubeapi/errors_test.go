@@ -29,6 +29,34 @@ func TestMapError(t *testing.T) {
 		}
 	})
 
+	t.Run("400 で返ったクォータ切れ（videos.insert の uploadLimitExceeded など）も KindQuota", func(t *testing.T) {
+		for _, reason := range []string{"quotaExceeded", "uploadLimitExceeded", "dailyLimitExceeded"} {
+			// Arrange
+			err := &googleapi.Error{Code: 400, Errors: []googleapi.ErrorItem{{Reason: reason}}}
+
+			// Act
+			got := mapError(err)
+
+			// Assert
+			if domain.KindOf(got) != domain.KindQuota {
+				t.Errorf("%s: got = %v (%v)", reason, got, domain.KindOf(got))
+			}
+		}
+	})
+
+	t.Run("400 のその他は KindUnexpected", func(t *testing.T) {
+		// Arrange
+		err := &googleapi.Error{Code: 400, Errors: []googleapi.ErrorItem{{Reason: "invalidTitle"}}}
+
+		// Act
+		got := mapError(err)
+
+		// Assert
+		if domain.KindOf(got) != domain.KindUnexpected {
+			t.Errorf("got = %v", got)
+		}
+	})
+
 	t.Run("403 のその他は KindUnexpected", func(t *testing.T) {
 		// Arrange
 		err := &googleapi.Error{Code: 403, Errors: []googleapi.ErrorItem{{Reason: "forbidden"}}}

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptrace"
@@ -66,9 +67,15 @@ func (c *Client) do(ctx context.Context, fn func() error) error {
 }
 
 // doCreate は、何かを作る fn を、混み合いで断られたとき（何も作られていない）だけやり直して呼び、エラーを変換する。
-// 5xx や通信の失敗は、YouTube が作ったあとで失敗したのかもしれないので、二重に作らないようやり直さない。
-func (c *Client) doCreate(ctx context.Context, fn func() error) error {
-	return mapError(c.retry(ctx, isRateLimited, fn))
+// 5xx や通信の失敗は、YouTube が作ったあとで失敗したのかもしれないので、二重に作らないようやり直さず、
+// uncertain（作られたかもしれないこと、確かめ方）を本文にした KindUnexpected を返す。
+func (c *Client) doCreate(ctx context.Context, uncertain string, fn func() error) error {
+	err := c.retry(ctx, isRateLimited, fn)
+	if err != nil && mayHaveCreated(err) {
+		redactURL(err)
+		return domain.Errorf(domain.KindUnexpected, "%s", uncertain).Wrap(err)
+	}
+	return mapError(err)
 }
 
 // MyChannel は、ログイン中のチャンネルを返す。チャンネルがなければ KindSetup。
@@ -248,7 +255,7 @@ func (w *sendWatch) watch(ctx context.Context) context.Context {
 
 // maybeCreated は、Do が err で失敗したとき、YouTube に動画ができたかもしれないかを返す。
 // できていないと言い切れるのは、次の 2 つのときだけ。
-//   - 要求を 1 つも書いていない（接続できなかった、トークンを更新できなかったなど）。
+//   - 要求を 1 つも書いておらず、YouTube の応答もない（接続できなかった、トークンを更新できなかったなど）。
 //   - 書いた要求は最初の 1 つだけで、YouTube がそれに失敗の状態コードで応えた（err が googleapi.Error）。
 //     ただし中身を含む要求（multipart）なら 4xx のときだけ。5xx は、作ったあとで失敗したのかもしれない。
 //     セッションを作る要求は中身を含まず、断られればセッションの送り先も受け取っていないので、5xx でも何もできていない。
@@ -256,13 +263,15 @@ func (w *sendWatch) watch(ctx context.Context) context.Context {
 // 2 つ目の要求を書いた（セッションができて中身を送り始めた）とき、最初の要求の応答を受け取れなかった（接続が切れたなど）とき、
 // セッションを作れたのに続きを書く前に失敗したとき、成功の応答を読めなかったときは、できたかもしれない。
 // 2 つ目以降の要求への応答は 2 つ目の要求を書いたあとにしか来ないので、要求が 1 つのときの googleapi.Error は最初の要求への応答。
+// 要求を書いた記録がないのに YouTube の応答（googleapi.Error）があるときは、見張りが要求を見落としている。
+// どの要求をいくつ書いたか分からないので、できたかもしれない側に倒す。
 func (w *sendWatch) maybeCreated(err error) bool {
+	gerr, answered := errors.AsType[*googleapi.Error](err)
 	switch w.wrote.Load() {
 	case 0:
-		return false
+		return answered
 	case 1:
-		gerr, ok := errors.AsType[*googleapi.Error](err)
-		if !ok {
+		if !answered {
 			return true
 		}
 		return !w.session.Load() && gerr.Code >= 500
@@ -332,7 +341,8 @@ func toPlaylist(it *youtube.Playlist) domain.Playlist {
 }
 
 // CreatePlaylist は、限定公開の再生リストを作り、作った再生リストを返す。説明の最後に目印がなければ足す。
-// 混み合いで断られたとき（何も作られていない）だけ送り直す。5xx や通信の失敗は、作られたかもしれないので送り直さない。
+// 混み合いで断られたとき（何も作られていない）だけ送り直す。5xx や通信の失敗は、作られたかもしれないので送り直さず、
+// 作り直す前に playlist ls で確かめるよう案内する（作り直して同じ名前が 2 つになると、名前で指定できなくなるため）。
 func (c *Client) CreatePlaylist(ctx context.Context, title, description string) (domain.Playlist, error) {
 	if !video.HasPlaylistMarker(description) {
 		description = video.AddPlaylistMarker(description)
@@ -342,7 +352,9 @@ func (c *Client) CreatePlaylist(ctx context.Context, title, description string) 
 		Status:  &youtube.PlaylistStatus{PrivacyStatus: video.PrivacyUnlisted},
 	}
 	var res *youtube.Playlist
-	err := c.doCreate(ctx, func() (err error) {
+	uncertain := fmt.Sprintf("再生リスト %s ができたかどうか分かりません（YouTube にできているかもしれません）。"+
+		"作り直す前に `youtube-cli playlist ls` で確かめてください（できていれば、作り直すと同じ名前の再生リストが 2 つになります）", title)
+	err := c.doCreate(ctx, uncertain, func() (err error) {
 		res, err = c.svc.Playlists.Insert([]string{"snippet", "status"}, pl).Context(ctx).Do()
 		return err
 	})
@@ -353,13 +365,16 @@ func (c *Client) CreatePlaylist(ctx context.Context, title, description string) 
 }
 
 // AddToPlaylist は、再生リストの最後に動画を入れる。
-// 混み合いで断られたとき（何も入っていない）だけ送り直す。5xx や通信の失敗は、入ったかもしれないので送り直さない。
+// 混み合いで断られたとき（何も入っていない）だけ送り直す。5xx や通信の失敗は、入ったかもしれないので送り直さず、
+// やり直す前に ls --playlist で確かめるよう案内する。
 func (c *Client) AddToPlaylist(ctx context.Context, playlistID, videoID string) error {
 	item := &youtube.PlaylistItem{Snippet: &youtube.PlaylistItemSnippet{
 		PlaylistId: playlistID,
 		ResourceId: &youtube.ResourceId{Kind: "youtube#video", VideoId: videoID},
 	}}
-	return c.doCreate(ctx, func() error {
+	uncertain := fmt.Sprintf("動画 %s を再生リスト %s に入れられたかどうか分かりません（入っているかもしれません）。"+
+		"やり直す前に `youtube-cli ls --playlist %s` で確かめてください", videoID, playlistID, playlistID)
+	return c.doCreate(ctx, uncertain, func() error {
 		_, err := c.svc.PlaylistItems.Insert([]string{"snippet"}, item).Context(ctx).Do()
 		return err
 	})
