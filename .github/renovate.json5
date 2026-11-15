@@ -1,0 +1,169 @@
+// Renovate の設定。.github/workflows/renovate.yml が毎週金曜の朝に Renovate を動かし、この設定を読む。
+// Renovate はこのファイルを既定のブランチから読むので、既定のブランチが main なら、変えたあと dev を main に入れるまで効かない。
+{
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+  extends: ['config:recommended'],
+  // config:recommended に入っている Merge Confidence のバッジは、Mend のサーバーにある画像を PR に貼る。
+  // 使う依存の名前と版が Mend に伝わるので外す。
+  ignorePresets: ['mergeConfidence:age-confidence-badges'],
+
+  // PR はすべて dev に向ける。動作を確かめてから、dev を main に入れてリリースに乗せる。
+  baseBranchPatterns: ['dev'],
+  timezone: 'Asia/Tokyo',
+
+  // 出たばかりの版は、取り下げや乗っ取られた版のことがあるので、公開から 3 日経ったものだけ PR にする。
+  // 待っている更新は Dependency Dashboard の issue に並ぶ。
+  minimumReleaseAge: '3 days',
+
+  // Renovate は週に 1 回（金曜）しか動かないので、prHourlyLimit が 1 回で新しく作る PR の上限になる。
+  prHourlyLimit: 5,
+  prConcurrentLimit: 10,
+
+  // コミットメッセージと PR タイトルを commitlint.config.mjs の形（type: :emoji: 件名）にする。
+  // type は下の packageRules の semanticCommitType で決まる。
+  // 1 つの PR にまとめた更新では、Renovate が fix を chore より優先して semanticCommitType を選ぶ。
+  // グループに youtube-cli の実行ファイルに入る依存が 1 つでも入っていれば fix になり、main に入るとパッチ版が出る（release.config.mjs）。
+  semanticCommits: 'enabled',
+  commitMessagePrefix: "{{#if (equals semanticCommitType 'fix')}}fix: :bug:{{else}}chore: :broom:{{/if}}",
+
+  // 更新した go.mod に合わせて go.sum を整える。major の更新（/v2 → /v3 など）では、import のパスも書き換える。
+  postUpdateOptions: ['gomodTidy', 'gomodUpdateImportPaths'],
+
+  packageRules: [
+    // trash/go.mod は、trash/ の中の Go のファイルを ./... や golangci-lint から外すためだけにある（CLAUDE.md）。上げない。
+    {
+      matchFileNames: ['trash/**'],
+      enabled: false,
+    },
+    // 開発用ツール・Actions・mise のツールの更新は chore にする。main に入ってもリリースは出ない。
+    {
+      matchPackageNames: ['*'],
+      semanticCommitType: 'chore',
+    },
+    // youtube-cli の実行ファイルに入る依存（go.mod の require）の更新は fix にする。
+    // main に入ると semantic-release がパッチ版を出す。
+    {
+      matchManagers: ['gomod'],
+      matchDepTypes: ['require'],
+      semanticCommitType: 'fix',
+    },
+    // golang.org/x/tools は archtest（internal/archtest のテスト）だけが使い、実行ファイルには入らない。
+    {
+      matchManagers: ['gomod'],
+      matchDepNames: ['golang.org/x/tools'],
+      semanticCommitType: 'chore',
+    },
+    // Go 本体は標準ライブラリとして実行ファイルに入るので、fix にする（グループは下の go）。
+    {
+      matchDepNames: ['go'],
+      matchManagers: ['mise', 'gomod'],
+      semanticCommitType: 'fix',
+    },
+
+    // 更新ごとに PR が分かれると数が多くて見きれないので、確かめ方が同じ依存を 1 つのグループ（1 つの PR）にまとめる。
+    // 1 つの依存に当たるルールがいくつかあるときは、後ろのルールの groupName が勝つ。
+    // major の更新は、Renovate がグループごとに別の PR（タイトルの末尾が (major)）に分ける。
+
+    // Go のモジュール（下で別のグループにしたもの以外）。CI（ci.yml の go）の lint とテストが通れば OK。
+    // golang.org/x/sys や golang.org/x/term は Windows の分でも使うので、ci.yml を Run workflow で起動して go-windows も通す。
+    // go.mod の indirect（間接の依存）は、Renovate が既定で上げない。脆弱性のあるものは trivy-daily.yml の fix ジョブが上げる。
+    {
+      matchManagers: ['gomod'],
+      matchDepTypes: ['require'],
+      groupName: 'go modules',
+    },
+    // Google の API とログイン（OAuth）。CI に加えて、E2E テスト（docs/development.md）で本物の YouTube に対して確かめる。
+    {
+      matchManagers: ['gomod'],
+      matchDepNames: ['google.golang.org/api', 'golang.org/x/oauth2', 'cloud.google.com/go/**', 'github.com/googleapis/**'],
+      groupName: 'google api',
+    },
+    // キーチェーン。CI に加えて、macOS のキーチェーンと Windows の資格情報マネージャーでの読み書きを、利用者が確かめる。
+    {
+      matchManagers: ['gomod'],
+      matchDepNames: ['github.com/zalando/go-keyring'],
+      groupName: 'keyring',
+    },
+    // package.json は、コミットとリリースの仕組み（commitlint・semantic-release）のためだけにある。
+    // semantic-release は PR の CI では動かないので、main に入れたあとのリリースで確かめる。
+    {
+      matchManagers: ['npm'],
+      matchDepTypes: ['devDependencies'],
+      groupName: 'commit and release tools',
+    },
+    // mise で入れるツール（golangci-lint・trivy・lefthook・node・pnpm）。mise install し直して CI が通れば OK。
+    // .mise.toml の pnpm と package.json の packageManager は同じ版にする（.mise.toml）ので、packageManager もここに入れる。
+    // Go 本体は下の go のグループにする。
+    {
+      matchManagers: ['mise'],
+      groupName: 'toolchain',
+    },
+    {
+      matchManagers: ['npm'],
+      matchDepTypes: ['packageManager'],
+      groupName: 'toolchain',
+    },
+    // GitHub Actions。ワークフローが動けば OK。release.yml と trivy-daily.yml は PR では動かないので、main に入れたあとに確かめる。
+    {
+      matchManagers: ['github-actions'],
+      groupName: 'github actions',
+    },
+    // 0.x の minor の更新（0.15 → 0.17 など）は、semver では major と同じで壊れることがある。
+    // Renovate は minor として扱いグループの PR に入れてしまい、1 つのせいでグループ全体が止まるので、依存ごとの PR に分ける。
+    // Go のモジュールは外す。google.golang.org/api や golang.org/x/* は 0.x のまま minor を毎週・毎月のように上げ、
+    // 互換を保つ慣わしなので、分けると PR が増えるだけになる。
+    {
+      matchManagers: ['npm', 'mise', 'github-actions'],
+      matchCurrentVersion: '<1.0.0',
+      matchUpdateTypes: ['minor'],
+      groupName: null,
+    },
+    // Go 本体。.mise.toml の go と go.mod の go の行は同じ版にする（.mise.toml）ので、1 つの PR で上げる。
+    // go.mod の go の行は、Renovate が既定では上げない（「この版以上で動く」の意味のため）ので、bump で mise の go に合わせて上げる。
+    {
+      matchDepNames: ['go'],
+      matchManagers: ['mise', 'gomod'],
+      groupName: 'go',
+    },
+    {
+      matchManagers: ['gomod'],
+      matchDepNames: ['go'],
+      matchDepTypes: ['golang'],
+      rangeStrategy: 'bump',
+    },
+    // 新しい Go を求める版のモジュールに上げると、go.mod の go の行も上がり、.mise.toml の go とずれる。
+    // go.mod の go の行で動く版だけを PR にする。新しい Go が要る版は、上の go のグループで Go を上げたあとに PR になる。
+    {
+      matchManagers: ['gomod'],
+      constraintsFiltering: 'strict',
+    },
+
+    // trivy のリリースがある aquasecurity の Organization は IP 制限をかけていて、Actions から GitHub の API で版を調べられない。
+    // 同じ版番号で同時に出る Docker Hub の aquasec/trivy から、版と公開日時を取る。
+    // 0.76.1-arm64 や latest のようなタグは版として読まない。
+    {
+      matchManagers: ['mise'],
+      matchDepNames: ['trivy'],
+      overrideDatasource: 'docker',
+      overridePackageName: 'aquasec/trivy',
+      extractVersion: '^(?<version>\\d+\\.\\d+\\.\\d+)$',
+    },
+    // Renovate 本体は毎日のように新しい版が出て PR が絶えないので、月の初めの週（1〜7 日）にまとめて上げる。
+    // Renovate は金曜にしか動かないので、月の最初の金曜に上がる。
+    // 上げる時期がほかと違うので、github actions のグループには入れず、別の PR にする。
+    // イメージは下のルールで packageName が renovate に変わり、packageName で拾うと版を調べたあとに外れて
+    // github actions のグループに入ってしまうので、変わらない depName で拾う。
+    {
+      matchDepNames: ['renovatebot/github-action', 'ghcr.io/renovatebot/renovate'],
+      groupName: 'renovate',
+      schedule: ['* * 1-7 * *'],
+    },
+    // ghcr.io は公開日時を返さないので、そのままだと minimumReleaseAge の 3 日が数えられず、いつまでも上がらない。
+    // イメージは npm の renovate と同じ版番号で同時に出るので、版と公開日時は npm から取る。
+    {
+      matchPackageNames: ['ghcr.io/renovatebot/renovate'],
+      overrideDatasource: 'npm',
+      overridePackageName: 'renovate',
+    },
+  ],
+}

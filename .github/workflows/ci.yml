@@ -1,0 +1,138 @@
+name: ci
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  commitlint:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # PR に含まれるコミットをすべて辿るため、履歴を丸ごと取る。
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          # mise 本体の版。書かないと mise-action がその日の新しい版を入れ、日によって CI の結果が変わりうる。
+          version: 2026.11.2
+          install_args: node pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint commit messages
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: pnpm exec commitlint --from "$BASE_SHA" --to "$HEAD_SHA" --verbose
+
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup toolchain
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          version: 2026.11.2
+          install_args: go golangci-lint
+
+      # Go のビルドキャッシュ・モジュール・golangci-lint の解析の結果を残し、依存を毎回コンパイルし直さないようにする。
+      # 置き場所は決め打ちせず、ツールに聞く。
+      - name: Read Go cache paths
+        id: go-cache
+        run: |
+          {
+            echo "build=$(go env GOCACHE)"
+            echo "mod=$(go env GOMODCACHE)"
+            echo "lint=$(golangci-lint cache status | sed -n 's/^Dir: //p')"
+          } >> "$GITHUB_OUTPUT"
+
+      # 依存（go.sum）とツールの版（.mise.toml）が同じ間は同じキャッシュを使う。自分のコードの分は
+      # 小さいので、その場でコンパイルし直す。変わったら、前のキャッシュから始めて変わった分だけ作る。
+      - name: Cache Go builds and lint results
+        uses: actions/cache@v6
+        with:
+          path: |
+            ${{ steps.go-cache.outputs.build }}
+            ${{ steps.go-cache.outputs.mod }}
+            ${{ steps.go-cache.outputs.lint }}
+          key: go-${{ runner.arch }}-${{ hashFiles('go.sum', '.mise.toml') }}
+          restore-keys: go-${{ runner.arch }}-
+
+      - name: Lint (golangci-lint)
+        run: golangci-lint run ./...
+
+      # Windows 用のファイル（_windows.go）も lint する。Linux の上で動くので軽く、毎回動かす。
+      - name: Lint for Windows (golangci-lint)
+        env:
+          GOOS: windows
+        run: golangci-lint run ./...
+
+      - name: Test (go)
+        run: go test ./...
+
+  # Windows のマシンは遅いので、毎回は動かさず、手で起動したとき（workflow_dispatch）だけ動かす。
+  # 別のワークフローのファイルにせず ci.yml に置くのは、workflow_dispatch で起動できるのが
+  # 既定のブランチにあるワークフローだけだから。ci.yml が main にあれば、作業ブランチを選んでも
+  # そのブランチの ci.yml（このジョブを含む）が動く。
+  go-windows:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup toolchain
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          version: 2026.11.2
+          install_args: go
+
+      - name: Read Go cache paths
+        id: go-cache
+        run: |
+          {
+            echo "build=$(go env GOCACHE)"
+            echo "mod=$(go env GOMODCACHE)"
+          } >> "$GITHUB_OUTPUT"
+
+      # キーに runner.os を入れ、Linux のキャッシュと混ざらないようにする。
+      - name: Cache Go builds
+        uses: actions/cache@v6
+        with:
+          path: |
+            ${{ steps.go-cache.outputs.build }}
+            ${{ steps.go-cache.outputs.mod }}
+          key: go-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum', '.mise.toml') }}
+          restore-keys: go-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Test (go)
+        run: go test ./...
+
+  trivy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup trivy
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          version: 2026.11.2
+          install_args: trivy
+
+      # 対象・重大度・除外ディレクトリは trivy.yaml に、秘密情報の規則は trivy-secret.yaml に書いてある。
+      # 毎日の検査と、直った版への更新は trivy-daily.yml。
+      - name: Scan (trivy)
+        run: trivy fs .

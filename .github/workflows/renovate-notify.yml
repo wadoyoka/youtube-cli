@@ -1,0 +1,43 @@
+name: renovate-notify
+
+on:
+  # Renovate（renovate.yml）が更新 PR を作ったら、Slack に知らせる。
+  # Renovate は GitHub App のトークンで PR を作るので、このイベントで動く（GITHUB_TOKEN で作った PR だと動かない）。
+  pull_request:
+    types: [opened]
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    # Renovate のブランチ（renovate/ で始まる）から bot が作った PR だけを知らせる。
+    if: github.event.pull_request.user.type == 'Bot' && startsWith(github.head_ref, 'renovate/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify Slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          REPO: ${{ github.repository }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "::error::secrets.SLACK_WEBHOOK_URL が設定されていません"
+            exit 1
+          fi
+
+          payload="$(jq -n --arg repo "$REPO" --arg title "$PR_TITLE" --arg url "$PR_URL" --arg base "$BASE_REF" '
+            # Slack の mrkdwn では & < > が特別な意味を持つので、タイトルの中のものは置き換える。
+            def escape: gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;");
+            {
+              text: ":package: \($repo): Renovate が依存の更新 PR を作りました",
+              attachments: [{
+                color: "#1f8ded",
+                blocks: [{type: "section", text: {type: "mrkdwn", text: "<\($url)|\($title | escape)>（\($base) 向け）"}}]
+              }]
+            }
+          ')"
+
+          curl -fsS -X POST -H 'Content-Type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL"

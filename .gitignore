@@ -1,0 +1,23 @@
+# OAuth のクライアント情報とトークン（絶対にコミットしない）
+client_secret*.json
+token.json
+
+# `go build` が直下に出す実行ファイル
+/youtube-cli
+/youtube-cli.tmp
+/youtube-cli.exe
+
+# npm
+node_modules/
+
+# macOS メタデータ
+.DS_Store
+
+# Claude Code のローカル設定
+.claude/settings.local.json
+
+# 作業用の一時領域（コミットしない）
+.superpowers/
+
+# 設計書と実装計画（手元だけに置き、コミットしない）
+docs/superpowers/

@@ -1,0 +1,83 @@
+name: renovate
+
+on:
+  # 毎週金曜の朝に依存の新しい版を探し、dev 向けの更新 PR を作る。何をどう上げるかは .github/renovate.json5 に書いてある。
+  # cron は UTC。金曜 0:00 UTC = 金曜 9:00 JST。GitHub が混んでいると数分〜数十分遅れることがある。
+  # schedule は既定のブランチにあるワークフローだけが動く。
+  schedule:
+    - cron: '0 0 * * 5'
+  # 設定を変えたあとの確かめ用に、手でも動かせるようにする。
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'ブランチと PR を作らず、何をするかをログに出すだけにする'
+        type: boolean
+        default: false
+      log-level:
+        description: 'ログの詳しさ'
+        type: choice
+        options: [info, debug]
+        default: info
+
+permissions:
+  contents: read
+
+# 前の実行が終わらないうちに次が始まると、同じブランチを取り合うので、終わるまで待たせる。
+concurrency:
+  group: renovate
+  cancel-in-progress: false
+
+jobs:
+  renovate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # GITHUB_TOKEN で作った PR では ci.yml などのワークフローが動かず、.github/workflows/ も書き換えられない。
+      # そのため、Renovate 用の GitHub App のトークンを使う。トークンはこのリポジトリだけに効き、1 時間で切れる。
+      # Client ID も秘密鍵も、App を作った人以外に見せる必要はないので Secrets に置く。
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.RENOVATE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RENOVATE_APP_PRIVATE_KEY }}
+
+      # Renovate は自分でリポジトリを clone するので、checkout は要らない。
+      - name: Run Renovate
+        uses: renovatebot/github-action@43b963bf5dd5e57f1f95c59765a018d782870211 # v46.3.11
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          # Renovate の Docker イメージの版。上げるのは Renovate 自身（.github/renovate.json5 の renovate グループ）。
+          renovate-version: 44.198.3
+        env:
+          RENOVATE_REPOSITORIES: ${{ github.repository }}
+          # 設定は .github/renovate.json5 に置いてあるので、設定を足す PR（onboarding）は作らせない。
+          RENOVATE_ONBOARDING: 'false'
+          # git ではなく GitHub の API でコミットさせ、App の署名付きコミットにする。
+          RENOVATE_PLATFORM_COMMIT: 'enabled'
+          # 空のときは Renovate が読まないので、schedule では普通に動く。
+          RENOVATE_DRY_RUN: ${{ inputs.dry-run && 'full' || '' }}
+          LOG_LEVEL: ${{ inputs.log-level || 'info' }}
+
+      # 失敗に気づかないと、PR が来ないまま依存が古くなっていくので、Slack に知らせる。
+      - name: Notify Slack on failure
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "::error::secrets.SLACK_WEBHOOK_URL が設定されていません"
+            exit 1
+          fi
+
+          payload="$(jq -n --arg repo "$REPO" --arg run_url "$RUN_URL" '{
+            text: ":warning: \($repo): Renovate の実行に失敗しました",
+            attachments: [{
+              color: "#9e9e9e",
+              blocks: [{type: "section", text: {type: "mrkdwn", text: "<\($run_url)|実行ログ>を確認してください。"}}]
+            }]
+          }')"
+
+          curl -fsS -X POST -H 'Content-Type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL"

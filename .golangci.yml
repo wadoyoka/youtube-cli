@@ -1,0 +1,106 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+issues:
+  # 同じ行に複数の linter の指摘があっても depguard の指摘を隠さない
+  uniq-by-line: false
+
+linters:
+  default: standard
+  enable:
+    - depguard
+    - errorlint
+    - gocritic
+    - revive
+    - gosec
+    # 新しい Go の書き方（errors.AsType、strings.SplitSeq、WaitGroup.Go など）に寄せる
+    - modernize
+    - nolintlint
+    - unparam
+  settings:
+    revive:
+      # 既定の規則から package-comments だけ外す（アプリなので package コメントは求めない）
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: empty-block
+        - name: error-naming
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: exported
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: range
+        - name: receiver-naming
+        - name: redefines-builtin-id
+        - name: superfluous-else
+        - name: time-naming
+        - name: unexported-return
+        - name: unreachable-code
+        - name: unused-parameter
+        - name: var-declaration
+        - name: var-naming
+    depguard:
+      rules:
+        google-api-only-in-repository:
+          files:
+            - "**/*.go"
+            - "!**/internal/repository/**"
+          deny:
+            - pkg: google.golang.org/api
+              desc: Google の API は repository の中だけで使います。ほかの層から使うときは repository を通してください。
+            - pkg: golang.org/x/oauth2
+              desc: Google の API は repository の中だけで使います。ほかの層から使うときは repository を通してください。
+        cobra-only-in-cli:
+          files:
+            - "**/*.go"
+            - "!**/internal/cli/**"
+            - "!**/cmd/**"
+          deny:
+            - pkg: github.com/spf13/cobra
+              desc: cobra は cli と cmd の中だけで使います。
+        keyring-only-in-repository:
+          files:
+            - "**/*.go"
+            - "!**/internal/repository/**"
+          deny:
+            - pkg: github.com/zalando/go-keyring
+              desc: キーチェーンは repository の中だけで使います。
+        exec-only-in-repository:
+          files:
+            - "**/*.go"
+            - "!**/internal/repository/**"
+          deny:
+            - pkg: os/exec
+              desc: 外部コマンドの実行は repository の中だけで行います。ほかの層から呼ぶときは repository を通してください。
+        os-api-only-in-repository:
+          files:
+            - "**/*.go"
+            - "!**/internal/repository/**"
+          deny:
+            - pkg: golang.org/x/sys/windows
+              desc: Windows の API は repository の中だけで使います。
+            - pkg: golang.org/x/term
+              desc: 端末の判定は repository の中だけで行います。ほかの層から呼ぶときは repository を通してください。
+  exclusions:
+    paths:
+      - ^trash/
+      - ^node_modules/
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/wadoyoka/youtube-cli
+  exclusions:
+    paths:
+      - ^trash/
+      - ^node_modules/

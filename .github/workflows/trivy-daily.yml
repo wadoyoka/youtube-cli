@@ -1,0 +1,396 @@
+name: trivy-daily
+
+on:
+  # コードを変えなくても新しい脆弱性は公開されるので、毎日 trivy を回して Slack に知らせる。
+  # 直った版が出ているものは、上げて dev 向けの PR にする（fix ジョブ）。
+  # cron は UTC。0:00 UTC = 9:00 JST。GitHub が混んでいると数分〜数十分遅れることがある。
+  # schedule は既定のブランチにあるワークフローだけが動く。
+  schedule:
+    - cron: '0 0 * * *'
+  # 通知の確認用に手動でも動かせるようにする。
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  trivy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup trivy
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          # mise 本体の版。書かないと mise-action がその日の新しい版を入れ、日によって CI の結果が変わりうる。
+          # 上げるのは Renovate（.github/renovate.json5 の github actions のグループ）。
+          version: 2026.11.2
+          install_args: trivy
+
+      # 対象・重大度・除外ディレクトリは trivy.yaml に、秘密情報の規則は trivy-secret.yaml に書いてある。
+      # 見つかっても Slack に送ってから落とすので、ここでは --exit-code 0 で止めない。
+      - name: Scan dependencies and secrets
+        id: scan
+        run: |
+          trivy fs --format json --output trivy-results.json --exit-code 0 .
+          # ログでも読めるように表の形でも出す。convert も trivy.yaml の exit-code を読むので 0 にする。
+          trivy convert --format table --exit-code 0 trivy-results.json
+          count="$(jq '[.Results[]? | (.Vulnerabilities // [])[], (.Secrets // [])[]] | length' trivy-results.json)"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+
+      # スキャン自体が失敗したときも黙らないように、always() で必ず送る。
+      - name: Notify Slack
+        if: always()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SCAN_OUTCOME: ${{ steps.scan.outcome }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "::error::secrets.SLACK_WEBHOOK_URL が設定されていません"
+            exit 1
+          fi
+
+          if [ "$SCAN_OUTCOME" != "success" ]; then
+            payload="$(jq -n --arg repo "$REPO" --arg run_url "$RUN_URL" '{
+              text: ":warning: \($repo): trivy の実行に失敗しました",
+              attachments: [{
+                color: "#9e9e9e",
+                blocks: [{type: "section", text: {type: "mrkdwn", text: "<\($run_url)|実行ログ>を確認してください。"}}]
+              }]
+            }')"
+          else
+            payload="$(jq --arg repo "$REPO" --arg run_url "$RUN_URL" '
+              def rank: {CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3}[.] // 4;
+              [.Results[]? | .Target as $target |
+                ((.Vulnerabilities // [])[] | {
+                  severity: .Severity,
+                  line: "`\(.Severity)` \(if .PrimaryURL then "<\(.PrimaryURL)|\(.VulnerabilityID)>" else .VulnerabilityID end) \(.PkgName) \(.InstalledVersion) → \(.FixedVersion // "" | if . == "" then "修正版なし" else . end)（\($target)）"
+                }),
+                ((.Secrets // [])[] | {
+                  severity: .Severity,
+                  line: "`\(.Severity)` 秘密情報: \(.Title)（\($target):\(.StartLine)）"
+                })
+              ] | sort_by(.severity | rank) as $findings |
+              ($findings | group_by(.severity | rank) | map("\(.[0].severity) \(length)") | join(" / ")) as $counts |
+              if ($findings | length) == 0 then {
+                text: ":white_check_mark: \($repo): trivy で問題は見つかりませんでした",
+                attachments: [{
+                  color: "#2eb67d",
+                  blocks: [{type: "section", text: {type: "mrkdwn", text: "HIGH / CRITICAL の脆弱性と秘密情報はありません。<\($run_url)|実行ログ>"}}]
+                }]
+              } else {
+                text: ":rotating_light: \($repo): trivy で \($findings | length) 件見つかりました（\($counts)）",
+                attachments: [{
+                  color: "#e01e5a",
+                  blocks: [{type: "section", text: {type: "mrkdwn", text: (
+                    # section の text は 3000 文字までなので、先頭の 10 件だけ載せる。
+                    ([$findings[:10][] | "• \(.line)"] | join("\n"))
+                    + (if ($findings | length) > 10 then "\n…ほか \(($findings | length) - 10) 件" else "" end)
+                    + "\n<\($run_url)|実行ログ>"
+                  )}}]
+                }]
+              } end
+            ' trivy-results.json)"
+          fi
+
+          curl -fsS -X POST -H 'Content-Type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL"
+
+      # Slack に送ったあとで落として、Actions の画面でも赤く見えるようにする。
+      - name: Fail if findings
+        if: steps.scan.outputs.count != '0'
+        env:
+          COUNT: ${{ steps.scan.outputs.count }}
+        run: |
+          echo "::error::trivy で ${COUNT} 件見つかりました"
+          exit 1
+
+  # 見つかった脆弱性のうち、直った版が出ているものを上げて、dev 向けの PR を作る。
+  # PR は dev に向けるので、既定のブランチではなく dev を調べる。dev で直っていれば PR は作らない。
+  # PR は 1 つだけで、毎日その日の dev から作り直す。
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # 前の実行が終わらないうちに次が始まると、同じブランチを取り合うので、終わるまで待たせる。
+    concurrency:
+      group: trivy-fix
+      cancel-in-progress: false
+    steps:
+      # push は git ではなく GitHub の API で行うので、GITHUB_TOKEN を .git/config に残さない。
+      # 下の pnpm update などで動く依存のコードから読まれないようにするため。
+      - uses: actions/checkout@v7
+        with:
+          ref: dev
+          persist-credentials: false
+
+      - name: Setup tools
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          version: 2026.11.2
+          install_args: node pnpm go trivy
+
+      # 結果はリポジトリの外（RUNNER_TEMP）に書き、PR に入らないようにする。
+      # --list-all-pkgs は、直した依存が開発用かどうか（Dev）と、上げたあとの版を調べるのに使う。
+      - name: Scan dev
+        run: trivy fs --format json --list-all-pkgs --exit-code 0 --output "$RUNNER_TEMP/trivy-before.json" .
+
+      - name: Update vulnerable npm packages
+        run: |
+          # 直った版が出ている、脆弱な npm の依存の名前。間接の依存も入る。
+          read -ra pkgs <<< "$(jq -r '
+            [.Results[]? | select(.Type == "pnpm") | (.Vulnerabilities // [])[] | select((.FixedVersion // "") != "") | .PkgName]
+            | unique | join(" ")
+          ' "$RUNNER_TEMP/trivy-before.json")"
+          if [ "${#pkgs[@]}" -eq 0 ]; then
+            echo "上げる npm の依存はありません"
+            exit 0
+          fi
+
+          # package.json の範囲（^21.2.4 など）は変えずに（--no-save）、範囲の中の新しい版に上げる。
+          # 範囲の外にしか直った版がないものは上がらず、PR の「残っているもの」に並ぶ。
+          # Renovate と同じく、公開から 3 日（4320 分）経った版だけを使う。
+          pnpm update --no-save --config.minimumReleaseAge=4320 "${pkgs[@]}"
+
+      - name: Update vulnerable Go modules
+        env:
+          # 上げる版が新しい Go を求めるとき、go.mod の go の行を上げたり新しい Go を取ってきたりせず、失敗させる。
+          # Go の版は .mise.toml と go.mod の go の行でそろえ、Renovate の go のグループで上げるため。
+          GOTOOLCHAIN: local
+        run: |
+          # 直った版が出ている、脆弱な Go のモジュールを「名前 入っている版 上げる版」の形で 1 行ずつ出す。
+          # 間接の依存（go.mod の // indirect）も入る。Go 本体（stdlib）は、上と同じ理由で Renovate の go のグループに任せる。
+          # 上げる版は、直った版のうち入っている版より新しく、一番古いもの（変える量を一番小さくする）。
+          # trivy の FixedVersion は「0.17.0, 0.18.1」のように、系列ごとの版が並ぶことがある。
+          # 入っている版（InstalledVersion）には頭に v が付き、直った版には付かないことがあるので、数字だけを比べ、v を付けて go get に渡す。
+          # 同じ版に脆弱性がいくつかあるときは、どれも直る版（その中で一番新しいもの）にする。
+          jq -r '
+            def ver: [scan("[0-9]+") | tonumber];
+            [.Results[]? | select(.Type == "gomod") | (.Vulnerabilities // [])[]
+              | select(.PkgName != "stdlib" and (.FixedVersion // "") != "")
+              | .InstalledVersion as $installed
+              | {
+                  name: .PkgName,
+                  installed: $installed,
+                  target: ([.FixedVersion | split(",")[] | capture("(?<v>[0-9][0-9A-Za-z.+-]*)").v | select(ver > ($installed | ver))] | min_by(ver))
+                }
+            ] | map(select(.target)) | group_by([.name, .installed])[]
+            | [.[0].name, .[0].installed, "v\(map(.target) | max_by(ver))"] | @tsv
+          ' "$RUNNER_TEMP/trivy-before.json" > "$RUNNER_TEMP/modules.tsv"
+
+          if [ ! -s "$RUNNER_TEMP/modules.tsv" ]; then
+            echo "上げる Go のモジュールはありません"
+            exit 0
+          fi
+
+          while IFS=$'\t' read -r name installed target; do
+            # Renovate と同じく、公開から 3 日経っていない版には上げない。取り下げられた（retract）版にも上げない。
+            # 公開日時（Time）と取り下げ（Retracted）は、go list が Go のモジュールプロキシから取る。
+            if ! info="$(go list -m -retracted -json "$name@$target")"; then
+              echo "::warning::$name $target の情報を取れませんでした"
+              continue
+            fi
+            if ! jq -e '((.Retracted // []) | length) == 0 and ((.Time | sub("\\.[0-9]+"; "") | fromdateiso8601) < now - 3 * 24 * 60 * 60)' <<< "$info" > /dev/null; then
+              echo "::notice::$name $target は公開から 3 日経っていないか、取り下げられているので、今日は上げません"
+              continue
+            fi
+            # その版が新しい Go を求めるときは失敗する（GOTOOLCHAIN=local）。上げずに残し、PR の「残っているもの」に並べる。
+            if ! go get "$name@$target"; then
+              echo "::warning::$name を $installed から $target に上げられませんでした"
+            fi
+          done < "$RUNNER_TEMP/modules.tsv"
+
+          # 上げた版で要らなくなった依存を、go.mod と go.sum から除く。
+          go mod tidy
+
+      # 上げたあとにもう一度調べ、前後の結果から、直したものと残っているものを PR に書く。
+      - name: Summarize
+        id: summary
+        run: |
+          trivy fs --format json --list-all-pkgs --exit-code 0 --output "$RUNNER_TEMP/trivy-after.json" .
+
+          jq -n --slurpfile before "$RUNNER_TEMP/trivy-before.json" --slurpfile after "$RUNNER_TEMP/trivy-after.json" '
+            def findings: [.Results[]? | .Target as $target | (.Packages // []) as $pkgs | (.Vulnerabilities // [])[] | . as $v | {
+              target: $target,
+              id: .VulnerabilityID,
+              url: .PrimaryURL,
+              severity: .Severity,
+              pkg: .PkgName,
+              installed: .InstalledVersion,
+              fixed: (.FixedVersion // ""),
+              dev: any($pkgs[]; .ID == $v.PkgID and .Dev == true)
+            }];
+            def rank: {CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3}[.] // 4;
+            def link: if .url then "[\(.id)](\(.url))" else .id end;
+            ($before[0] | findings) as $b |
+            ($after[0] | findings) as $a |
+            # 依存の版が上がっても、同じ脆弱性が残っていれば直ったことにしない。
+            [$b[] | . as $f | select(any($a[]; .target == $f.target and .id == $f.id and .pkg == $f.pkg) | not)
+              | . + {now: ([$after[0].Results[]? | select(.Target == $f.target) | (.Packages // [])[] | select(.Name == $f.pkg) | .Version] | unique | join(", "))}
+            ] as $fixed |
+            # 開発用でない依存（youtube-cli の実行ファイルに入るもの）を 1 つでも直したら fix にし、main に入るとパッチ版が出るようにする。
+            # 開発用の依存（package.json の devDependencies）だけなら chore にする。Renovate の semanticCommitType（.github/renovate.json5）と同じ考え方。
+            # trivy は Go のモジュールを開発用と見分けないので、Go のモジュールを直したら fix になる。
+            (if any($fixed[]; .dev | not) then "fix: :bug:" else "chore: :broom:" end) as $prefix |
+            "\($prefix) trivy で見つかった依存の脆弱性を直す" as $title |
+            ($fixed | sort_by(.severity | rank) | map("\(.pkg) \(.installed) → \(.now)（\(.id), \(.severity), \(.target)）")) as $lines |
+            {
+              fixed: ($fixed | length),
+              title: $title,
+              commit_message: ([$title, ""] + ($lines | map("- \(.)")) | join("\n")),
+              body: (
+                [
+                  "trivy（`.github/workflows/trivy-daily.yml`）が dev で見つけた脆弱性のうち、直った版が出ているものを上げました。",
+                  "",
+                  "## 直したもの",
+                  "",
+                  ($fixed | sort_by(.severity | rank)[] | "- `\(.severity)` \(link) \(.pkg) \(.installed) → \(.now)（\(.target)）")
+                ]
+                + (if ($a | length) == 0 then [] else [
+                  "",
+                  "## 残っているもの",
+                  "",
+                  "直った版がない、直った版が公開から 3 日経っていない、package.json の範囲の外にしかない、直った版が新しい Go を求める、などの理由で上げられなかったものです。手で直してください。Go 本体（stdlib）は、`.mise.toml` の go と go.mod の go の行を上げて直します（Renovate の go のグループ）。",
+                  "",
+                  ($a | sort_by(.severity | rank)[] | "- `\(.severity)` \(link) \(.pkg) \(.installed)（直った版: \(if .fixed == "" then "なし" else .fixed end)）（\(.target)）")
+                ] end)
+                + [
+                  "",
+                  "---",
+                  "",
+                  "- npm の依存は、package.json の範囲の中で、公開から 3 日経った一番新しい版に上げています。Go のモジュールは、直った版のうち一番古い版に上げています（公開から 3 日経ち、いまの Go の版で使えるものだけ）。",
+                  "- このブランチは毎日 dev から作り直します。このブランチに足したコミットは消えるので、手で直すときは別のブランチで直してください。"
+                ]
+                | join("\n")
+              )
+            }
+          ' > "$RUNNER_TEMP/summary.json"
+
+          jq -r '.body' "$RUNNER_TEMP/summary.json" > "$RUNNER_TEMP/pr-body.md"
+          fixed="$(jq '.fixed' "$RUNNER_TEMP/summary.json")"
+          delimiter="EOF_$(openssl rand -hex 8)"
+          {
+            echo "fixed=$fixed"
+            echo "title=$(jq -r '.title' "$RUNNER_TEMP/summary.json")"
+            echo "commit-message<<$delimiter"
+            jq -r '.commit_message' "$RUNNER_TEMP/summary.json"
+            echo "$delimiter"
+          } >> "$GITHUB_OUTPUT"
+
+          # 1 つも直せなかったときは、上げた分（範囲の中で上がったが、まだ脆弱な版など）を戻して差分をなくす。
+          # 差分がないと、次のステップが前の日に作った PR を閉じる。
+          if [ "$fixed" -eq 0 ]; then
+            echo "直せた脆弱性はありません"
+            git checkout -- pnpm-lock.yaml go.mod go.sum
+          fi
+
+      # GITHUB_TOKEN で作った PR では ci.yml が動かないので、Renovate（renovate.yml）と同じ GitHub App のトークンで PR を作る。
+      # App は Workflows の書き込みなども持つが、このトークンは Contents と Pull requests の書き込みだけに絞る。
+      # 依存のコードが動くステップ（pnpm update など）が終わってから作り、トークンが生きている間を短くする。
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.RENOVATE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RENOVATE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      # 書き込みのトークンを外のアクションに渡さないよう、gh で GitHub の API を直接呼んで PR を作る。
+      # コミットは git push ではなく API（Git Database API）で作り、App の署名付きコミットにする（Renovate と同じ）。
+      - name: Create pull request
+        id: pr
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: trivy/fix-vulnerabilities
+          TITLE: ${{ steps.summary.outputs.title }}
+          COMMIT_MESSAGE: ${{ steps.summary.outputs.commit-message }}
+        run: |
+          pr_number="$(gh api "repos/$REPO/pulls?head=${REPO%%/*}:$BRANCH&base=dev&state=open" --jq '.[0].number // empty')"
+          # matching-refs は名前の頭が同じブランチも返すので、名前が同じものがあるかを見る。
+          branch_exists="$(gh api "repos/$REPO/git/matching-refs/heads/$BRANCH" --jq "any(.[]; .ref == \"refs/heads/$BRANCH\")")"
+
+          # dev との差分がない（dev で直った、または直せるものがない）ときは、前の日に作った PR を閉じてブランチを消す。
+          if git diff --quiet -- pnpm-lock.yaml go.mod go.sum; then
+            if [ -n "$pr_number" ]; then
+              jq -n '{body: "dev で直ったか、直せる脆弱性がなくなったので閉じます。"}' | gh api "repos/$REPO/issues/$pr_number/comments" --input - --silent
+              gh api -X PATCH "repos/$REPO/pulls/$pr_number" -f state=closed --silent
+            fi
+            if [ "$branch_exists" = true ]; then
+              gh api -X DELETE "repos/$REPO/git/refs/heads/$BRANCH" --silent
+            fi
+            echo "operation=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 変えたファイルを blob にして、dev の tree に重ねた tree とコミットを作る。親は dev の先頭。
+          git diff --name-only -z -- pnpm-lock.yaml go.mod go.sum | while IFS= read -r -d '' path; do
+            sha="$(base64 -w0 "$path" | jq -Rs '{content: ., encoding: "base64"}' | gh api "repos/$REPO/git/blobs" --input - --jq '.sha')"
+            mode="$(git ls-files --stage -- "$path" | cut -d ' ' -f 1)"
+            jq -n --arg path "$path" --arg mode "$mode" --arg sha "$sha" '{path: $path, mode: $mode, type: "blob", sha: $sha}'
+          done > "$RUNNER_TEMP/tree-entries.json"
+          tree="$(jq -s --arg base "$(git rev-parse 'HEAD^{tree}')" '{base_tree: $base, tree: .}' "$RUNNER_TEMP/tree-entries.json" \
+            | gh api "repos/$REPO/git/trees" --input - --jq '.sha')"
+          # author と committer を書かないと App のコミットになり、GitHub が署名する。
+          commit="$(jq -n --arg message "$COMMIT_MESSAGE" --arg tree "$tree" --arg parent "$(git rev-parse HEAD)" '{message: $message, tree: $tree, parents: [$parent]}' \
+            | gh api "repos/$REPO/git/commits" --input - --jq '.sha')"
+
+          # ブランチは毎日 dev から作り直すので、あれば作ったコミットに強制で付け替え、なければ作る。
+          if [ "$branch_exists" = true ]; then
+            gh api -X PATCH "repos/$REPO/git/refs/heads/$BRANCH" -f sha="$commit" -F force=true --silent
+          else
+            gh api "repos/$REPO/git/refs" -f ref="refs/heads/$BRANCH" -f sha="$commit" --silent
+          fi
+
+          # PR があればタイトルと説明を書き換え、なければ作る。
+          if [ -n "$pr_number" ]; then
+            url="$(jq -n --arg title "$TITLE" --rawfile body "$RUNNER_TEMP/pr-body.md" '{title: $title, body: $body}' \
+              | gh api -X PATCH "repos/$REPO/pulls/$pr_number" --input - --jq '.html_url')"
+            operation=updated
+          else
+            url="$(jq -n --arg title "$TITLE" --arg head "$BRANCH" --rawfile body "$RUNNER_TEMP/pr-body.md" '{title: $title, head: $head, base: "dev", body: $body}' \
+              | gh api "repos/$REPO/pulls" --input - --jq '.html_url')"
+            operation=created
+          fi
+          echo "PR（$operation）: $url"
+          {
+            echo "operation=$operation"
+            echo "url=$url"
+          } >> "$GITHUB_OUTPUT"
+
+      # PR を作ったときと、失敗したときに知らせる。毎日の作り直し（updated）では知らせない。
+      - name: Notify Slack
+        if: failure() || steps.pr.outputs.operation == 'created'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          JOB_STATUS: ${{ job.status }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PR_TITLE: ${{ steps.summary.outputs.title }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "::error::secrets.SLACK_WEBHOOK_URL が設定されていません"
+            exit 1
+          fi
+
+          if [ "$JOB_STATUS" != "success" ]; then
+            payload="$(jq -n --arg repo "$REPO" --arg run_url "$RUN_URL" '{
+              text: ":warning: \($repo): trivy で見つかった脆弱性を直す PR を作れませんでした",
+              attachments: [{
+                color: "#9e9e9e",
+                blocks: [{type: "section", text: {type: "mrkdwn", text: "<\($run_url)|実行ログ>を確認してください。"}}]
+              }]
+            }')"
+          else
+            payload="$(jq -n --arg repo "$REPO" --arg title "$PR_TITLE" --arg url "$PR_URL" '{
+              text: ":lock: \($repo): trivy で見つかった脆弱性を直す PR を作りました",
+              attachments: [{
+                color: "#1f8ded",
+                blocks: [{type: "section", text: {type: "mrkdwn", text: "<\($url)|\($title)>（dev 向け）"}}]
+              }]
+            }')"
+          fi
+
+          curl -fsS -X POST -H 'Content-Type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL"

@@ -1,0 +1,45 @@
+name: release
+
+on:
+  # dev を main にマージしたとき。semantic-release が前のタグからのコミットで次の版を決め、
+  # タグ（v1.2.3）と GitHub のリリース（リリースノート）を作る。設定は release.config.mjs。
+  # 実行ファイルのビルドと配布（CD）はしない。
+  push:
+    branches: [main]
+
+# 続けてマージしても、前のリリースが終わってから次を始める（同じ版を 2 回出さないため）。
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      # タグの push と、リリースの作成に要る。PR や issue へのコメントは止めてあるので、ほかの権限は要らない。
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # 前のタグからのコミットを数えるので、履歴とタグをすべて取る。
+          fetch-depth: 0
+          # push には semantic-release が GITHUB_TOKEN を使う。checkout の認証は残さない。
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          # mise 本体の版。書かないと mise-action がその日の新しい版を入れ、日によって CI の結果が変わりうる。
+          # 上げるのは Renovate（.github/renovate.json5 の github actions のグループ）。
+          version: 2026.11.2
+          install_args: node pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # 後からマージしたコミットがすでに main にあると、semantic-release は「main より古い」として何もせずに終わり、
+      # 後の実行がまとめてリリースする。
+      - name: Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: pnpm exec semantic-release

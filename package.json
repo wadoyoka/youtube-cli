@@ -1,0 +1,14 @@
+{
+  "name": "youtube-cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@commitlint/cli": "^21.2.4",
+    "@semantic-release/commit-analyzer": "^13.0.1",
+    "@semantic-release/release-notes-generator": "^14.1.1",
+    "conventional-changelog-conventionalcommits": "^9.3.1",
+    "semantic-release": "^25.0.9"
+  },
+  "packageManager": "pnpm@12.16.1"
+}

@@ -1,0 +1,32 @@
+pre-commit:
+  commands:
+    # 名前の順に走る。名前の頭の番号で順を固定する。
+    1-gofmt:
+      glob: "*.go"
+      run: golangci-lint fmt {staged_files}
+      stage_fixed: true
+    2-golangci-lint:
+      glob: "*.go"
+      run: golangci-lint run ./...
+    3-gotest:
+      glob: "*.go"
+      # ステージした Go のファイルのディレクトリだけを試す。
+      run: |
+        dirs="$(for f in {staged_files}; do d="$(dirname "$f")"; [ "$d" = . ] && echo . || echo "./$d"; done | sort -u)"
+        go test $dirs ./internal/archtest/...
+    4-trivy-secret:
+      # 作業ツリーではなく、コミットされる内容（インデックス）だけを検査する。
+      # 作業ツリーを直接見ると、コミットしない未追跡ファイルまで引っかかるため。
+      run: |
+        tmp="$(mktemp -d)"
+        trap 'rm -rf "$tmp"' EXIT
+        git checkout-index --prefix="$tmp/" -- {staged_files}
+        trivy fs --quiet --table-mode detailed --scanners secret "$tmp"
+    5-trivy-vuln:
+      glob: "{go.mod,go.sum,pnpm-lock.yaml}"
+      run: trivy fs --scanners vuln .
+
+commit-msg:
+  commands:
+    commitlint:
+      run: pnpm exec commitlint --edit {1}
