@@ -667,4 +667,17 @@ func TestSetThumbnail(t *testing.T) {
 			t.Errorf("err=%v", err)
 		}
 	})
+
+	t.Run("403 の forbidden は、電話番号の確認の案内を含む KindUnexpected", func(t *testing.T) {
+		// Arrange
+		c := newTestClient(t, refused(http.StatusForbidden, "forbidden"))
+
+		// Act
+		err := c.SetThumbnail(context.Background(), "vid1", strings.NewReader("PNGDATA"), "image/png")
+
+		// Assert
+		if domain.KindOf(err) != domain.KindUnexpected || !strings.Contains(err.Error(), "電話番号") {
+			t.Errorf("err=%v kind=%v", err, domain.KindOf(err))
+		}
+	})
 }

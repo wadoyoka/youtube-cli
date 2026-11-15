@@ -4,7 +4,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/signal"
 	"runtime"
@@ -15,6 +14,7 @@ import (
 	"github.com/wadoyoka/youtube-cli/internal/repository/browser"
 	"github.com/wadoyoka/youtube-cli/internal/repository/config"
 	"github.com/wadoyoka/youtube-cli/internal/repository/gcloud"
+	"github.com/wadoyoka/youtube-cli/internal/repository/localfile"
 	"github.com/wadoyoka/youtube-cli/internal/repository/terminal"
 	"github.com/wadoyoka/youtube-cli/internal/repository/youtubeapi"
 	"github.com/wadoyoka/youtube-cli/internal/usecase"
@@ -52,13 +52,14 @@ func run(ctx context.Context) int {
 	status := account.Status{Dir: configDir, Auth: authn, Remote: remote}
 	initUC := setup.Init{Dir: configDir, Policy: policy}
 	return cli.Execute(ctx, cli.Deps{
-		Init:   initUC,
-		Login:  login,
-		Logout: account.Logout{Auth: authn},
-		Status: status,
-		List:   video.List{Remote: remote},
-		Upload: video.Upload{Remote: remote, Open: openFile},
-		Policy: policy,
+		Init:      initUC,
+		Login:     login,
+		Logout:    account.Logout{Auth: authn},
+		Status:    status,
+		List:      video.List{Remote: remote},
+		Upload:    video.Upload{Remote: remote, Open: localfile.Open},
+		Thumbnail: video.Thumbnail{Remote: remote, Open: localfile.Open},
+		Policy:    policy,
 		Setup: setup.Setup{
 			Init:    initUC,
 			Policy:  policy,
@@ -76,21 +77,4 @@ func run(ctx context.Context) int {
 		Stdout:       os.Stdout,
 		Stderr:       os.Stderr,
 	}, os.Args[1:])
-}
-
-// openFile は、手元のファイルを開き、大きさとともに返す（video.Upload の Open）。ディレクトリは開かない。
-func openFile(path string) (io.ReadCloser, int64, error) {
-	f, err := os.Open(path) //nolint:gosec // 利用者が引数で指定した、上げるファイル
-	if err != nil {
-		return nil, 0, err
-	}
-	info, err := f.Stat()
-	if err == nil && info.IsDir() {
-		err = fmt.Errorf("%s はディレクトリです", path)
-	}
-	if err != nil {
-		_ = f.Close()
-		return nil, 0, err
-	}
-	return f, info.Size(), nil
 }

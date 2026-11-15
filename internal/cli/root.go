@@ -17,17 +17,18 @@ import (
 
 // Deps は、コマンドが使うものをまとめたもの。
 type Deps struct {
-	Init   setup.Init
-	Login  account.Login
-	Logout account.Logout
-	Status account.Status
-	Setup  setup.Setup
-	List   video.List
-	Upload video.Upload
-	Policy usecase.PolicyStore
-	Stdin  io.Reader
-	Stdout io.Writer
-	Stderr io.Writer
+	Init      setup.Init
+	Login     account.Login
+	Logout    account.Logout
+	Status    account.Status
+	Setup     setup.Setup
+	List      video.List
+	Upload    video.Upload
+	Thumbnail video.Thumbnail
+	Policy    usecase.PolicyStore
+	Stdin     io.Reader
+	Stdout    io.Writer
+	Stderr    io.Writer
 	// Interactive は、標準入力と標準エラーが両方とも端末なら true。
 	Interactive bool
 	// WindowsPaths は、Windows で動いているとき true。
@@ -85,7 +86,7 @@ func newRootCommand(d Deps) *cobra.Command {
 	root.PersistentFlags().BoolVar(asJSON, "json", false, "結果を JSON で出す")
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usageError(err) })
 	root.AddCommand(newInitCommand(d, asJSON), newLoginCommand(d, asJSON), newLogoutCommand(d, asJSON),
-		newStatusCommand(d, asJSON), newSetupCommand(d, asJSON), newLsCommand(d, asJSON), newUploadCommand(d, asJSON))
+		newStatusCommand(d, asJSON), newSetupCommand(d, asJSON), newLsCommand(d, asJSON), newUploadCommand(d, asJSON), newThumbnailCommand(d, asJSON))
 	return root
 }
 

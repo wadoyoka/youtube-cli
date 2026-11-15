@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 	"net/http/httptrace"
 	"slices"
 	"strings"
@@ -270,8 +271,13 @@ func (c *Client) SetThumbnail(ctx context.Context, videoID string, img io.Reader
 	if err != nil {
 		return domain.Errorf(domain.KindUnexpected, "サムネイルの画像を読めません").Wrap(err)
 	}
-	return c.do(ctx, func() error {
+	err = c.do(ctx, func() error {
 		_, err := c.svc.Thumbnails.Set(videoID).Media(bytes.NewReader(data), googleapi.ContentType(mimeType)).Context(ctx).Do()
 		return err
 	})
+	if gerr, ok := errors.AsType[*googleapi.Error](err); ok && gerr.Code == http.StatusForbidden && domain.KindOf(err) == domain.KindUnexpected {
+		return domain.Errorf(domain.KindUnexpected,
+			"YouTube がサムネイルの設定を断りました。チャンネルの電話番号の確認が済んでいない可能性があります（https://www.youtube.com/verify で確認できます）").Wrap(err)
+	}
+	return err
 }

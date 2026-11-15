@@ -68,7 +68,7 @@ func (u Upload) Run(ctx context.Context, in UploadInput) (UploadResult, error) {
 	if err := dv.ValidateMeta(meta); err != nil {
 		return UploadResult{}, err
 	}
-	body, size, err := u.open(in.Path, "動画")
+	body, size, err := openLocal(u.Open, in.Path, "動画")
 	if err != nil {
 		return UploadResult{}, err
 	}
@@ -76,7 +76,7 @@ func (u Upload) Run(ctx context.Context, in UploadInput) (UploadResult, error) {
 	var thumb io.ReadCloser
 	var thumbMime string
 	if in.ThumbnailPath != "" {
-		if thumb, thumbMime, err = u.openThumbnail(in.ThumbnailPath); err != nil {
+		if thumb, thumbMime, err = openThumbnail(u.Open, in.ThumbnailPath); err != nil {
 			return UploadResult{}, err
 		}
 		defer func() { _ = thumb.Close() }()
@@ -119,9 +119,9 @@ func (u Upload) Run(ctx context.Context, in UploadInput) (UploadResult, error) {
 	return res, nil
 }
 
-// open は、手元のファイルを開く。ファイルがなければ KindNotFound、開けなければ KindUsage。what は「動画」などの呼び名。
-func (u Upload) open(path, what string) (io.ReadCloser, int64, error) {
-	f, size, err := u.Open(path)
+// openLocal は、open で手元のファイルを開く。ファイルがなければ KindNotFound、開けなければ KindUsage。what は「動画」などの呼び名。
+func openLocal(open func(string) (io.ReadCloser, int64, error), path, what string) (io.ReadCloser, int64, error) {
+	f, size, err := open(path)
 	switch {
 	case err == nil:
 		return f, size, nil
@@ -133,8 +133,8 @@ func (u Upload) open(path, what string) (io.ReadCloser, int64, error) {
 }
 
 // openThumbnail は、サムネイルを開き、形式と大きさを確かめて、MIME タイプとともに返す。
-func (u Upload) openThumbnail(path string) (io.ReadCloser, string, error) {
-	f, size, err := u.open(path, "サムネイル")
+func openThumbnail(open func(string) (io.ReadCloser, int64, error), path string) (io.ReadCloser, string, error) {
+	f, size, err := openLocal(open, path, "サムネイル")
 	if err != nil {
 		return nil, "", err
 	}
