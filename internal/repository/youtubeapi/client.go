@@ -3,6 +3,7 @@ package youtubeapi
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"google.golang.org/api/option"
@@ -71,4 +72,63 @@ func (c *Client) MyChannel(ctx context.Context) (domain.Channel, error) {
 		ch.UploadsPlaylistID = item.ContentDetails.RelatedPlaylists.Uploads
 	}
 	return ch, nil
+}
+
+// pageSize は、一覧と一括取得で1回に頼む最大の件数（API の上限）。
+const pageSize = 50
+
+// ListPlaylistVideoIDs は、再生リストの動画の ID を、全ページ分返す。
+func (c *Client) ListPlaylistVideoIDs(ctx context.Context, playlistID string) ([]string, error) {
+	var ids []string
+	pageToken := ""
+	for {
+		var resp *youtube.PlaylistItemListResponse
+		err := c.do(ctx, func() (err error) {
+			resp, err = c.svc.PlaylistItems.List([]string{"contentDetails"}).PlaylistId(playlistID).MaxResults(pageSize).PageToken(pageToken).Context(ctx).Do()
+			return err
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, it := range resp.Items {
+			if it.ContentDetails != nil && it.ContentDetails.VideoId != "" {
+				ids = append(ids, it.ContentDetails.VideoId)
+			}
+		}
+		if resp.NextPageToken == "" {
+			return ids, nil
+		}
+		pageToken = resp.NextPageToken
+	}
+}
+
+// GetVideos は、ID の動画を50件ずつ引いて返す。見つからない ID は結果に入れない。
+func (c *Client) GetVideos(ctx context.Context, ids []string) ([]domain.Video, error) {
+	var videos []domain.Video
+	for batch := range slices.Chunk(ids, pageSize) {
+		var resp *youtube.VideoListResponse
+		err := c.do(ctx, func() (err error) {
+			resp, err = c.svc.Videos.List([]string{"snippet", "status"}).Id(batch...).Context(ctx).Do()
+			return err
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, it := range resp.Items {
+			videos = append(videos, toVideo(it))
+		}
+	}
+	return videos, nil
+}
+
+func toVideo(it *youtube.Video) domain.Video {
+	v := domain.Video{ID: it.Id}
+	if s := it.Snippet; s != nil {
+		v.Title, v.Description, v.Tags = s.Title, s.Description, s.Tags
+		v.PublishedAt, _ = time.Parse(time.RFC3339, s.PublishedAt)
+	}
+	if s := it.Status; s != nil {
+		v.PrivacyStatus, v.UploadStatus = s.PrivacyStatus, s.UploadStatus
+	}
+	return v
 }

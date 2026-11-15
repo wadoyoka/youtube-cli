@@ -19,6 +19,7 @@ import (
 	"github.com/wadoyoka/youtube-cli/internal/usecase"
 	"github.com/wadoyoka/youtube-cli/internal/usecase/account"
 	"github.com/wadoyoka/youtube-cli/internal/usecase/setup"
+	"github.com/wadoyoka/youtube-cli/internal/usecase/video"
 )
 
 func main() {
@@ -54,6 +55,7 @@ func run(ctx context.Context) int {
 		Login:  login,
 		Logout: account.Logout{Auth: authn},
 		Status: status,
+		List:   video.List{Remote: remote},
 		Policy: policy,
 		Setup: setup.Setup{
 			Init:    initUC,

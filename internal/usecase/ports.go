@@ -62,6 +62,10 @@ type Authenticator interface {
 type YouTube interface {
 	// MyChannel は、ログイン中のチャンネルを返す。チャンネルがなければ KindSetup。
 	MyChannel(ctx context.Context) (domain.Channel, error)
+	// ListPlaylistVideoIDs は、再生リストの動画の ID を、全ページ分返す。
+	ListPlaylistVideoIDs(ctx context.Context, playlistID string) ([]string, error)
+	// GetVideos は、ID の動画を返す。見つからない ID は結果に入れない。
+	GetVideos(ctx context.Context, ids []string) ([]domain.Video, error)
 }
 
 // YouTubeOpener は、保存済みのトークンで YouTube を開く。

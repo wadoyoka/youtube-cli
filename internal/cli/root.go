@@ -12,6 +12,7 @@ import (
 	"github.com/wadoyoka/youtube-cli/internal/usecase"
 	"github.com/wadoyoka/youtube-cli/internal/usecase/account"
 	"github.com/wadoyoka/youtube-cli/internal/usecase/setup"
+	"github.com/wadoyoka/youtube-cli/internal/usecase/video"
 )
 
 // Deps は、コマンドが使うものをまとめたもの。
@@ -21,6 +22,7 @@ type Deps struct {
 	Logout account.Logout
 	Status account.Status
 	Setup  setup.Setup
+	List   video.List
 	Policy usecase.PolicyStore
 	Stdin  io.Reader
 	Stdout io.Writer
@@ -84,6 +86,6 @@ func newRootCommand(d Deps) *cobra.Command {
 	root.PersistentFlags().BoolVar(asJSON, "json", false, "結果を JSON で出す")
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usageError(err) })
 	root.AddCommand(newInitCommand(d, asJSON), newLoginCommand(d, asJSON), newLogoutCommand(d, asJSON),
-		newStatusCommand(d, asJSON), newSetupCommand(d, asJSON))
+		newStatusCommand(d, asJSON), newSetupCommand(d, asJSON), newLsCommand(d, asJSON))
 	return root
 }

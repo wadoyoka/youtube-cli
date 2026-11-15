@@ -12,6 +12,11 @@ type YouTube struct {
 	Channel    domain.Channel
 	ChannelErr error // MyChannel が返すエラー（Channel より優先）
 	Calls      []string
+
+	PlaylistVideoIDs map[string][]string // 再生リストの ID ごとの、動画の ID（一覧の遅れを真似るため、Videos より少なくしてよい）
+	Videos           []domain.Video      // GetVideos が探す動画
+	ListErr          error               // ListPlaylistVideoIDs が返すエラー
+	GetErr           error               // GetVideos が返すエラー
 }
 
 // MyChannel は、ChannelErr があればそれを、なければ Channel を返す。
@@ -21,6 +26,32 @@ func (f *YouTube) MyChannel(context.Context) (domain.Channel, error) {
 		return domain.Channel{}, f.ChannelErr
 	}
 	return f.Channel, nil
+}
+
+// ListPlaylistVideoIDs は、PlaylistVideoIDs の playlistID の分を返す。
+func (f *YouTube) ListPlaylistVideoIDs(_ context.Context, playlistID string) ([]string, error) {
+	f.Calls = append(f.Calls, "ListPlaylistVideoIDs")
+	if f.ListErr != nil {
+		return nil, f.ListErr
+	}
+	return f.PlaylistVideoIDs[playlistID], nil
+}
+
+// GetVideos は、Videos のうち ids にあるものを、ids の順に返す。
+func (f *YouTube) GetVideos(_ context.Context, ids []string) ([]domain.Video, error) {
+	f.Calls = append(f.Calls, "GetVideos")
+	if f.GetErr != nil {
+		return nil, f.GetErr
+	}
+	var out []domain.Video
+	for _, id := range ids {
+		for _, v := range f.Videos {
+			if v.ID == id {
+				out = append(out, v)
+			}
+		}
+	}
+	return out, nil
 }
 
 // Opener は、yt を返す YouTubeOpener を作る。
