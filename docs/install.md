@@ -11,6 +11,7 @@
 - macOS を主に想定している。Linux、Windows 10・11 でも動く。トークンの暗号化の鍵は OS のキーチェーンに置く（キーチェーンのない環境は [setup.md](setup.md#鍵の置き場所) を参照。Windows は資格情報マネージャー）。
 - macOS では Xcode Command Line Tools（cgo と `codesign` のため）。
 - Windows では git、go、make（Scoop で入れられる。[README](../README.md#youtube-cli-のインストール)）。
+- リポジトリは private なので、GitHub でこのリポジトリを読める権限と、git の認証（`gh auth login`、SSH の鍵など）。
 
 ## macOS
 
@@ -28,17 +29,19 @@ make install
 
 新しい版を入れたあとの最初の実行では、キーチェーンのダイアログが出る。許可してよい相手は [setup.md](setup.md#鍵の置き場所) を参照。
 
-### 前の版を `go install` で入れていた場合
-
-その古い実行ファイルを消す（`$(go env GOPATH)/bin` か、使っているバージョン管理ツールの Go の bin ディレクトリにある）。そのあと `which -a youtube-cli` を実行して、`make install` で入れたものだけが並ぶことを確かめる。古い実行ファイルは古い（守りのない）項目を使い続け、移し替えのあとに動くと、`security` に対するダイアログが出るため。
-
 ## Linux
 
+macOS と同じく、clone して `make install` を実行する。`~/.local/bin` に入る（署名はしない。`BINDIR` で入れ先を変えられる）。
+
 ```bash
-go install github.com/wadoyoka/youtube-cli/cmd/youtube-cli@latest
+git clone https://github.com/wadoyoka/youtube-cli.git
+cd youtube-cli
+make install
 ```
 
-`$(go env GOPATH)/bin` が PATH に入っていることを確かめる。鍵は Secret Service に置く。Secret Service のない環境では `YOUTUBE_CLI_KEYRING=file` を使う（[setup.md](setup.md#鍵の置き場所)）。
+`~/.local/bin` が PATH に入っていることを確かめる。鍵は Secret Service に置く。Secret Service のない環境では `YOUTUBE_CLI_KEYRING=file` を使う（[setup.md](setup.md#鍵の置き場所)）。
+
+`go install github.com/wadoyoka/youtube-cli/cmd/youtube-cli@latest` でも入れられるが、リポジトリが private なので、そのままでは使えない（Go のモジュールのプロキシとチェックサムのデータベースが、private のリポジトリを読めないため）。使うときは、`GOPRIVATE=github.com/wadoyoka/youtube-cli` を設定し、git が GitHub に認証できるようにしておく（`gh auth login` で git の認証を設定する、`https://github.com/` を SSH に置き換えるなど）。入るのは `$(go env GOPATH)/bin`。
 
 ## Windows
 

@@ -43,7 +43,7 @@ youtube-cli setup --client-secret ~/Downloads/client_secret_xxx.json
 9. ダウンロードした JSON のパスを聞いて、暗号化して取り込む。デスクトップアプリのクライアントの JSON でなければ（ウェブアプリケーションのクライアントのものなど）、理由を出して聞き直す。JSON の `project_id` が手順 6 のプロジェクトと違えば、警告して続けるかを聞く。
    - Windows では、パスに `C:\Users\me\x.json` も、Git Bash の `/c/Users/me/x.json` も入れてよい（`\` は外さず、`/c/...` は `C:/...` に直す。`~\` と `~/` はホームディレクトリ）。
 10. ログインする（`login` と同じ処理）。ログイン済みで、JSON を取り込み直していなければ飛ばす。ただし、Google 側でトークンが無効になっている（取り消された、期限が切れたなど）と分かったときは、飛ばさずにログインし直す。
-11. プロジェクト、gcloud のアカウント、ログインした Google アカウント、チャンネルのリンク、鍵の置き場所を表示する。
+11. プロジェクト、gcloud のアカウント、ログインしたチャンネルの名前（「ログイン:」の行）、チャンネルのリンク、鍵の置き場所を表示する。スコープにメールアドレスを読む権限がないので、Google アカウントのメールアドレスは表示しない。
 
 `setup` が GCP に加える変更は、プロジェクトの作成と YouTube Data API の有効化だけ。gcloud は、`auth list`、`projects describe`、`projects create`、`services enable youtube.googleapis.com` の4つしか呼ばない（毎回 `--quiet` を付け、標準入力はつながない）。
 

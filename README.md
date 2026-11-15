@@ -67,11 +67,15 @@ make install
 
 `~/.local/bin` が PATH に入っていることを確かめる。macOS では `go install` や `go build` で入れたものは OS のキーチェーンを使えないので、必ず `make install` で入れる。
 
-Linux:
+Linux: macOS と同じく、clone して `make install` を実行する（`~/.local/bin` に入る）。
 
 ```bash
-go install github.com/wadoyoka/youtube-cli/cmd/youtube-cli@latest
+git clone https://github.com/wadoyoka/youtube-cli.git
+cd youtube-cli
+make install
 ```
+
+リポジトリは private なので、clone には GitHub の認証が要る。`go install …@latest` は、`GOPRIVATE` の設定と git の認証がないと使えない（[docs/install.md](docs/install.md)）。
 
 Windows: PowerShell で、Scoop で git・go・make を入れてから、`make install` を実行する。`%USERPROFILE%\.local\bin\youtube-cli.exe` に入る。make は PowerShell、cmd、Git Bash のどこから実行してもよい。
 
@@ -85,7 +89,7 @@ make install
 
 最後の行は、PATH に `%USERPROFILE%\.local\bin` を足す（1回だけ）。足したら、端末を開き直す。
 
-前の版から入れ替えるときの注意などは [docs/install.md](docs/install.md)。
+入れ方ごとの注意は [docs/install.md](docs/install.md)。
 
 ## プロジェクトのセットアップ
 
@@ -128,10 +132,10 @@ youtube-cli ls -l                      # 上げたものを確かめる
 
 結果に、動画のリンク（`https://youtu.be/...`）と YouTube Studio のリンクが出る。公開範囲は常に限定公開で、リンクを知っている人だけが見られる。
 
-- タイトルを省くと、拡張子を除いたファイル名になる。100 文字以内で、`<` と `>` は使えない。
+- タイトルを省くと、拡張子を除いたファイル名になる。100 文字以内で、`<` と `>` は使えない（説明も同じ）。
 - 同じタイトルの、このツールで上げた動画があると、何も送らずに終了コード 5 で止まる。
-- 途中で失敗したときや、サムネイルや再生リストの追加だけが失敗したときは、同じコマンドに `--skip-existing` を付けてやり直す。上げずに、既にある動画で残りの手順だけを行う。
-- 「アップロードの結果が分かりません」（終了コード 1）と出たときは、**自動では送り直さない。** YouTube Studio で動画ができているかを確かめてから、`--skip-existing` を付けてやり直す。
+- 途中で失敗したときや、サムネイルや再生リストの追加だけが失敗したときは、同じコマンドに `--skip-existing` を付けてやり直す。上げずに、既にある動画で残りの手順だけを行う。ただし「手元の記録に足せませんでした」と警告が出ていたときは、エラーに出る `youtube-cli thumbnail` か `youtube-cli playlist add` のコマンドでやり直す（[docs/commands.md](docs/commands.md#やり直し--skip-existing)）。
+- 「アップロードの結果が分かりません」（終了コード 1）と出たときは、**自動では送り直さない。** YouTube Studio に動画があれば、`youtube-cli ls --json` に出るまで待ってから、同じコマンドに `--skip-existing` を付けてやり直す（出る前に付けると、もう1本上がる）。
 - 1 日に上げられるのは 100 本まで（クォータ。終了コード 8）。
 - 再生リストは、既定では拒否リストで止めてある。使うときは人が `policy.toml` を直す（[docs/policy.md](docs/policy.md)）。
 
