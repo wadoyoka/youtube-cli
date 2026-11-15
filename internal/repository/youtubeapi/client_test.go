@@ -865,6 +865,13 @@ func (s *playlistServer) handle(w http.ResponseWriter, r *http.Request) {
 	respond(w, r)
 }
 
+// count は、受け取った要求の数を返す。hangUp のように何も書かずに切る応答では、通信が前後関係を作らないので、ロックして読む。
+func (s *playlistServer) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.got)
+}
+
 // respondJSON は、v を JSON で返す応答。
 func respondJSON(v any) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
@@ -933,8 +940,8 @@ func TestCreatePlaylist(t *testing.T) {
 			_, err := c.CreatePlaylist(context.Background(), "A", "")
 
 			// Assert
-			if err == nil || len(s.got) != 1 {
-				t.Errorf("%s: err=%v 要求=%d", name, err, len(s.got))
+			if n := s.count(); err == nil || n != 1 {
+				t.Errorf("%s: err=%v 要求=%d", name, err, n)
 			}
 			if domain.KindOf(err) != domain.KindUnexpected || !strings.Contains(err.Error(), "できているかもしれません") || !strings.Contains(err.Error(), "`youtube-cli playlist ls`") {
 				t.Errorf("%s: err=%v", name, err)
@@ -997,8 +1004,8 @@ func TestAddToPlaylist(t *testing.T) {
 			err := c.AddToPlaylist(context.Background(), "PL1", "vid1")
 
 			// Assert
-			if err == nil || len(s.got) != 1 {
-				t.Errorf("%s: err=%v 要求=%d", name, err, len(s.got))
+			if n := s.count(); err == nil || n != 1 {
+				t.Errorf("%s: err=%v 要求=%d", name, err, n)
 			}
 			if domain.KindOf(err) != domain.KindUnexpected || !strings.Contains(err.Error(), "入っているかもしれません") || !strings.Contains(err.Error(), "`youtube-cli ls --playlist PL1`") {
 				t.Errorf("%s: err=%v", name, err)
