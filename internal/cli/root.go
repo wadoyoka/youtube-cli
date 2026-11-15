@@ -40,7 +40,6 @@ type Deps struct {
 	WindowsPaths bool
 	// Progress は、送信の進み具合を標準エラーに出すとき true（標準エラーが端末で、ANSI の制御文字を使えるとき）。
 	Progress bool
-	// 後のタスクで、各 usecase のフィールドを足していく
 }
 
 // 拒否リストを確かめないコマンド。playlist は子コマンドの入れ物で、それだけなら使い方を出す。
