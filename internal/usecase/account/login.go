@@ -86,17 +86,18 @@ func restoreAfter(cause error, restore func() error) error {
 }
 
 // saveChannel は、ch を保存する。違うチャンネルが保存済みで switchChannel でなければ、restore してから KindConflict を返す。
+// 保存に成功するまでの失敗は、どれも restore してから返す。
 func (u Login) saveChannel(ctx context.Context, ch domain.Channel, switchChannel bool, restore func() error) ([]string, error) {
 	if u.Remote.Locker != nil {
 		unlock, err := u.Remote.Locker.Lock(ctx)
 		if err != nil {
-			return nil, err
+			return nil, restoreAfter(err, restore)
 		}
 		defer unlock()
 	}
 	saved, found, err := u.Remote.State.Channel()
 	if err != nil {
-		return nil, err
+		return nil, restoreAfter(err, restore)
 	}
 	var warnings []string
 	if found && saved.ID != ch.ID {
@@ -109,15 +110,16 @@ func (u Login) saveChannel(ctx context.Context, ch domain.Channel, switchChannel
 		}
 		warnings = append(warnings, fmt.Sprintf("チャンネルを %s から %s に切り替えました", saved.Title, ch.Title))
 	}
-	if !found || saved != ch {
-		if err := u.Remote.State.SetChannel(ch); err != nil {
-			return nil, err
-		}
-	}
-	// 記録は前のチャンネルのものなので、切り替えたら捨てる。
+	// 記録は前のチャンネルのものなので、切り替えるなら、チャンネルを保存する前に捨てる。
+	// 先に保存すると、Clear の失敗後に再実行しても（保存済みと同じチャンネルなので）記録が消えない。
 	if found && saved.ID != ch.ID && u.Remote.Ledger != nil {
 		if err := u.Remote.Ledger.Clear(); err != nil {
-			return nil, err
+			return nil, restoreAfter(err, restore)
+		}
+	}
+	if !found || saved != ch {
+		if err := u.Remote.State.SetChannel(ch); err != nil {
+			return nil, restoreAfter(err, restore)
 		}
 	}
 	return warnings, nil

@@ -33,23 +33,40 @@ type State struct {
 	Saved domain.Channel
 	Found bool
 	Sets  int // SetChannel を呼んだ回数
+
+	ChannelErr error // Channel が返すエラー
+	SetErr     error // SetChannel が返すエラー（保存しない）
 }
 
 // Channel は、保存したチャンネルを返す。
-func (s *State) Channel() (domain.Channel, bool, error) { return s.Saved, s.Found, nil }
+func (s *State) Channel() (domain.Channel, bool, error) {
+	if s.ChannelErr != nil {
+		return domain.Channel{}, false, s.ChannelErr
+	}
+	return s.Saved, s.Found, nil
+}
 
 // SetChannel は、チャンネルを保存する。
 func (s *State) SetChannel(ch domain.Channel) error {
+	if s.SetErr != nil {
+		return s.SetErr
+	}
 	s.Saved, s.Found = ch, true
 	s.Sets++
 	return nil
 }
 
 // Locker は、何もしない Locker。ロックの回数を数える。
-type Locker struct{ Locks int }
+type Locker struct {
+	Locks   int
+	LockErr error // Lock が返すエラー
+}
 
 // Lock は、回数を数えるだけで、すぐに返す。
 func (l *Locker) Lock(context.Context) (func(), error) {
+	if l.LockErr != nil {
+		return nil, l.LockErr
+	}
 	l.Locks++
 	return func() {}, nil
 }
@@ -58,7 +75,8 @@ func (l *Locker) Lock(context.Context) (func(), error) {
 type Ledger struct {
 	VideoList    []usecase.LedgerVideo
 	PlaylistList []usecase.LedgerPlaylist
-	Clears       int // Clear を呼んだ回数
+	Clears       int   // Clear を呼んだ回数
+	ClearErr     error // Clear が返すエラー（空にしない）
 }
 
 // Videos は、記録した動画を返す。
@@ -91,6 +109,9 @@ func (l *Ledger) AddPlaylist(p usecase.LedgerPlaylist) error {
 
 // Clear は、記録を空にして、回数を数える。
 func (l *Ledger) Clear() error {
+	if l.ClearErr != nil {
+		return l.ClearErr
+	}
 	l.VideoList, l.PlaylistList = nil, nil
 	l.Clears++
 	return nil

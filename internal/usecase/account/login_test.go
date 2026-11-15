@@ -143,6 +143,72 @@ func TestLogin(t *testing.T) {
 		}
 	})
 
+	t.Run("Lock が失敗したら token を元に戻す", func(t *testing.T) {
+		// Arrange
+		boom := errors.New("lock")
+		a := &usecasetest.Auth{SecretSaved: true}
+		u := newLogin(a, &usecasetest.YouTube{Channel: chanA}, &usecasetest.State{})
+		u.Remote.Locker = &usecasetest.Locker{LockErr: boom}
+
+		// Act
+		_, err := u.Run(context.Background(), LoginInput{})
+
+		// Assert
+		if !errors.Is(err, boom) || !slices.Contains(a.Calls, "restore") || a.TokenSaved {
+			t.Errorf("err=%v calls=%v token=%v", err, a.Calls, a.TokenSaved)
+		}
+	})
+
+	t.Run("保存したチャンネルを読めなければ token を元に戻す", func(t *testing.T) {
+		// Arrange
+		boom := errors.New("read")
+		a := &usecasetest.Auth{SecretSaved: true}
+		u := newLogin(a, &usecasetest.YouTube{Channel: chanA}, &usecasetest.State{ChannelErr: boom})
+
+		// Act
+		_, err := u.Run(context.Background(), LoginInput{})
+
+		// Assert
+		if !errors.Is(err, boom) || !slices.Contains(a.Calls, "restore") || a.TokenSaved {
+			t.Errorf("err=%v calls=%v token=%v", err, a.Calls, a.TokenSaved)
+		}
+	})
+
+	t.Run("チャンネルを保存できなければ token を元に戻す", func(t *testing.T) {
+		// Arrange
+		boom := errors.New("write")
+		a := &usecasetest.Auth{SecretSaved: true}
+		u := newLogin(a, &usecasetest.YouTube{Channel: chanA}, &usecasetest.State{SetErr: boom})
+
+		// Act
+		_, err := u.Run(context.Background(), LoginInput{})
+
+		// Assert
+		if !errors.Is(err, boom) || !slices.Contains(a.Calls, "restore") || a.TokenSaved {
+			t.Errorf("err=%v calls=%v token=%v", err, a.Calls, a.TokenSaved)
+		}
+	})
+
+	t.Run("切り替えで ledger を空にできなければ token を元に戻し、チャンネルは変えない", func(t *testing.T) {
+		// Arrange
+		boom := errors.New("clear")
+		a := &usecasetest.Auth{SecretSaved: true}
+		st := &usecasetest.State{Saved: chanA, Found: true}
+		l := &usecasetest.Ledger{ClearErr: boom}
+		u := newLoginWithLedger(a, &usecasetest.YouTube{Channel: chanB}, st, l)
+
+		// Act
+		_, err := u.Run(context.Background(), LoginInput{SwitchChannel: true})
+
+		// Assert
+		if !errors.Is(err, boom) || !slices.Contains(a.Calls, "restore") || a.TokenSaved {
+			t.Errorf("err=%v calls=%v token=%v", err, a.Calls, a.TokenSaved)
+		}
+		if st.Saved != chanA || st.Sets != 0 {
+			t.Errorf("チャンネルが変わった: %+v sets=%d", st.Saved, st.Sets)
+		}
+	})
+
 	t.Run("MyChannel が失敗したら token を元に戻す", func(t *testing.T) {
 		// Arrange
 		boom := errors.New("quota")
