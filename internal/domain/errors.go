@@ -75,16 +75,18 @@ func (e *Error) Error() string {
 // Unwrap は、原因のエラーを返す。
 func (e *Error) Unwrap() error { return e.Err }
 
-// Is は、target が種類と本文の同じ Error なら true を返す。
+// Is は、target が種類と本文の同じ Error なら true を返す。e か target が nil の *Error なら false。
 // 決まったエラー（ErrUploadUncertain など）に原因を付けた写しを、errors.Is で元のエラーと見分けられるようにするため。
 func (e *Error) Is(target error) bool {
 	t, ok := target.(*Error)
-	return ok && t.Kind == e.Kind && t.Message == e.Message
+	return ok && e != nil && t != nil && t.Kind == e.Kind && t.Message == e.Message
 }
 
 // ErrUploadUncertain は、動画を送り始めたあとで動画 ID を受け取れず、YouTube に動画ができたか分からないこと。
-// 二重に上げないよう、送り直さずに Studio で確かめてもらう。原因を付けるときは UploadUncertain を使う（これ自体は変えない）。
-var ErrUploadUncertain = Errorf(KindUnexpected, "アップロードの結果が分かりません。Studio で確かめてから、同じコマンドに --skip-existing を付けてやり直してください")
+// 二重に上げないよう、送り直さずに Studio で確かめてもらう。結果が分からない動画は手元の記録にないので、
+// --skip-existing が見つけられるのは YouTube の一覧（ls）に出てから。出る前に付けると、もう 1 本上がる。
+// 原因を付けるときは UploadUncertain を使う（これ自体は変えない）。
+var ErrUploadUncertain = Errorf(KindUnexpected, "アップロードの結果が分かりません。Studio に動画があれば、`youtube-cli ls --json` に出るまで待ってから、同じコマンドに `--skip-existing` を付けてやり直してください（出る前に付けると、もう1本上がります）")
 
 // UploadUncertain は、原因 cause を付けた ErrUploadUncertain の写しを返す。
 func UploadUncertain(cause error) *Error {

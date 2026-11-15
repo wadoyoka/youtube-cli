@@ -473,6 +473,48 @@ func TestUploadPlaylist(t *testing.T) {
 		}
 	})
 
+	t.Run("ledger に書けずに手順が失敗したら、--skip-existing ではなく、失敗した手順だけのコマンドを案内する", func(t *testing.T) {
+		// Arrange
+		yt := listed()
+		yt.Playlists = []domain.Playlist{cliPlaylist("PL1", "Go 入門")}
+		yt.InsertResult = cliVideo("new1", "intro", "uploaded")
+		yt.ThumbnailErr = errors.New("forbidden")
+		yt.AddToPlaylistErr = errors.New("backendError")
+		u, _ := newUpload(yt, &usecasetest.Ledger{AddErr: errors.New("書けない")})
+
+		// Act
+		res, err := u.Run(ctx, video.UploadInput{Path: "/v/intro.mp4", ThumbnailPath: "/v/thumb.png", PlaylistRef: "Go 入門"})
+
+		// Assert
+		if err == nil || domain.KindOf(err).ExitCode() != 1 || res.Video.ID != "new1" {
+			t.Fatalf("res=%+v err=%v", res, err)
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "`youtube-cli thumbnail new1 <画像>`") || !strings.Contains(msg, "`youtube-cli playlist add new1 PL1`") {
+			t.Errorf("失敗した手順だけのコマンドを案内するはず: %v", err)
+		}
+		if strings.Contains(msg, "上げずに残りの手順だけを行います") || !strings.Contains(msg, "もう1本上がる") {
+			t.Errorf("--skip-existing でのやり直しを勧めないはず: %v", err)
+		}
+	})
+
+	t.Run("ledger に書けずに再生リストだけが失敗したら、playlist add だけを案内する", func(t *testing.T) {
+		// Arrange
+		yt := listed()
+		yt.Playlists = []domain.Playlist{cliPlaylist("PL1", "Go 入門")}
+		yt.InsertResult = cliVideo("new1", "intro", "uploaded")
+		yt.AddToPlaylistErr = errors.New("backendError")
+		u, _ := newUpload(yt, &usecasetest.Ledger{AddErr: errors.New("書けない")})
+
+		// Act
+		_, err := u.Run(ctx, video.UploadInput{Path: "/v/intro.mp4", ThumbnailPath: "/v/thumb.png", PlaylistRef: "Go 入門"})
+
+		// Assert
+		if err == nil || !strings.Contains(err.Error(), "`youtube-cli playlist add new1 PL1`") || strings.Contains(err.Error(), "youtube-cli thumbnail") {
+			t.Errorf("err=%v", err)
+		}
+	})
+
 	t.Run("サムネイルの設定に失敗しても再生リストには入れ、両方の結果を返す", func(t *testing.T) {
 		// Arrange
 		yt := listed()

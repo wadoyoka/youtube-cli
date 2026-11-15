@@ -304,7 +304,7 @@ func TestUploadCommand(t *testing.T) {
 		}
 	})
 
-	t.Run("結果が分からないときは、Studio で確かめる案内を出して 1", func(t *testing.T) {
+	t.Run("結果が分からないときは、Studio と ls で確かめてからやり直す案内を出して 1", func(t *testing.T) {
 		// Arrange
 		d, out, errb, _ := newDeps(t)
 		d, yt := withUpload(d)
@@ -315,7 +315,7 @@ func TestUploadCommand(t *testing.T) {
 		code := Execute(ctx, d, []string{"upload", "/v/intro.mp4"})
 
 		// Assert
-		if code != 1 || out.Len() != 0 || !strings.Contains(errb.String(), "Studio で確かめて") || !strings.Contains(errb.String(), "--skip-existing") {
+		if code != 1 || out.Len() != 0 || !strings.Contains(errb.String(), "Studio に動画があれば、`youtube-cli ls --json` に出るまで待ってから") || !strings.Contains(errb.String(), "--skip-existing") {
 			t.Errorf("code=%d out=%q stderr=%q", code, out.String(), errb.String())
 		}
 	})

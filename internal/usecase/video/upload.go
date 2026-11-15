@@ -59,7 +59,8 @@ type UploadResult struct {
 //  5. 動画 ID を受け取ったら、すぐに ledger に記録する。記録できなくても、上げた動画は警告を付けて返す
 //  6. 限定公開で返ってこなければ警告する
 //  7. サムネイルを設定し、再生リストに入れる（すでに入っていれば何もしない）。片方が失敗してももう片方は行う。
-//     失敗しても動画は残るので、結果を返しつつ KindUnexpected のエラーにする
+//     失敗しても動画は残るので、結果を返しつつ KindUnexpected のエラーにする。5 で記録できなかったときは、
+//     --skip-existing ではなく、失敗した手順だけのコマンド（thumbnail、playlist add）でのやり直しを案内する
 //
 // ledger のロックは、記録するときだけ取る（Catalog が自分でロックを取るので、その間は持たない）。
 func (u Upload) Run(ctx context.Context, in UploadInput) (UploadResult, error) {
@@ -105,6 +106,7 @@ func (u Upload) Run(ctx context.Context, in UploadInput) (UploadResult, error) {
 		return UploadResult{}, err
 	}
 	res := UploadResult{Warnings: warnings}
+	recorded := true // 同じタイトルの確かめで、この動画が見つかる。false なら、YouTube の一覧に出るまで見つからない
 	if existing != nil {
 		res.Video, res.Existing = *existing, true
 	} else {
@@ -114,6 +116,7 @@ func (u Upload) Run(ctx context.Context, in UploadInput) (UploadResult, error) {
 		}
 		res.Video = v
 		if err := u.record(ctx, meta.Title, v, size); err != nil {
+			recorded = false
 			res.Warnings = append(res.Warnings, fmt.Sprintf("上げた動画を手元の記録に足せませんでした（しばらくの間、同じタイトルの確かめや ls に出ないことがあります）: %v", err))
 		}
 		if v.PrivacyStatus != dv.PrivacyUnlisted {
@@ -122,26 +125,33 @@ func (u Upload) Run(ctx context.Context, in UploadInput) (UploadResult, error) {
 	}
 	res.URL, res.StudioURL = res.Video.URL(), res.Video.StudioURL()
 
-	var failed []string
+	var failed, redo []string // 失敗した手順の名前と、その手順だけをやり直すコマンド
 	var errs []error
-	step := func(name string, err error) StepResult {
+	step := func(name, cmd string, err error) StepResult {
 		if err != nil {
-			failed, errs = append(failed, name), append(errs, err)
+			failed, redo, errs = append(failed, name), append(redo, cmd), append(errs, err)
 			return StepResult{Error: err.Error()}
 		}
 		return StepResult{Done: true}
 	}
 	if thumb != nil {
-		res.Thumbnail = step("サムネイルの設定", s.YT.SetThumbnail(ctx, res.Video.ID, thumb, thumbMime))
+		res.Thumbnail = step("サムネイルの設定", fmt.Sprintf("`youtube-cli thumbnail %s <画像>`", res.Video.ID),
+			s.YT.SetThumbnail(ctx, res.Video.ID, thumb, thumbMime))
 	}
 	if playlistID != "" {
 		_, err := playlist.AddIfAbsent(ctx, s.YT, playlistID, res.Video.ID)
-		res.Playlist = step("再生リストへの追加", err)
+		res.Playlist = step("再生リストへの追加", fmt.Sprintf("`youtube-cli playlist add %s %s`", res.Video.ID, playlistID), err)
 	}
 	if len(failed) > 0 {
-		return res, domain.Errorf(domain.KindUnexpected,
-			"%sに失敗しました（動画 %s は YouTube にあります）。同じコマンドに --skip-existing を付けてやり直すと、上げずに残りの手順だけを行います",
-			strings.Join(failed, "と"), res.Video.ID).Wrap(errors.Join(errs...))
+		how := "同じコマンドに --skip-existing を付けてやり直すと、上げずに残りの手順だけを行います"
+		if !recorded {
+			// 手元の記録がないと、--skip-existing は一覧に出る前のこの動画を見つけられず、もう 1 本上げてしまう。
+			// thumbnail と playlist add は上げ直さない（一覧に出る前なら、見つからずに止まるだけ）。
+			how = "手元の記録に足せなかったため、同じコマンドに --skip-existing を付けてやり直すと、もう1本上がることがあります。" +
+				strings.Join(redo, "、") + " で、失敗した手順だけをやり直してください（見つからないと出たら、`youtube-cli ls --json` に出るまで待ってから）"
+		}
+		return res, domain.Errorf(domain.KindUnexpected, "%sに失敗しました（動画 %s は YouTube にあります）。%s",
+			strings.Join(failed, "と"), res.Video.ID, how).Wrap(errors.Join(errs...))
 	}
 	return res, nil
 }

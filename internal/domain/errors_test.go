@@ -80,6 +80,25 @@ func TestErrorKind(t *testing.T) {
 		}
 	})
 
+	t.Run("nil の *Error と比べても panic せず、一致しない", func(t *testing.T) {
+		// Arrange
+		var nilErr *Error
+		errs := []error{Errorf(KindConflict, "c"), UploadUncertain(errors.New("原因")), fmt.Errorf("x: %w", ErrUploadUncertain)}
+
+		for _, err := range errs {
+			// Act
+			got := errors.Is(err, nilErr)
+
+			// Assert
+			if got {
+				t.Errorf("%v を nil の *Error と見なした", err)
+			}
+		}
+		if nilErr.Is(ErrUploadUncertain) {
+			t.Error("nil の *Error を ErrUploadUncertain と見なした")
+		}
+	})
+
 	t.Run("原因がなければ Message だけを返す", func(t *testing.T) {
 		// Arrange
 		err := Errorf(KindUsage, "m")
@@ -109,7 +128,7 @@ func TestUploadUncertain(t *testing.T) {
 		if KindOf(err) != KindUnexpected || KindOf(err).ExitCode() != 1 {
 			t.Errorf("kind = %v", KindOf(err))
 		}
-		want := "アップロードの結果が分かりません。Studio で確かめてから、同じコマンドに --skip-existing を付けてやり直してください"
+		want := "アップロードの結果が分かりません。Studio に動画があれば、`youtube-cli ls --json` に出るまで待ってから、同じコマンドに `--skip-existing` を付けてやり直してください（出る前に付けると、もう1本上がります）"
 		if de, ok := errors.AsType[*Error](err); !ok || de.Message != want {
 			t.Errorf("err = %v", err)
 		}
