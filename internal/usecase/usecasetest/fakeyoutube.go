@@ -2,8 +2,11 @@ package usecasetest
 
 import (
 	"context"
+	"errors"
+	"io"
 
 	"github.com/wadoyoka/youtube-cli/internal/domain"
+	"github.com/wadoyoka/youtube-cli/internal/domain/video"
 	"github.com/wadoyoka/youtube-cli/internal/usecase"
 )
 
@@ -17,6 +20,27 @@ type YouTube struct {
 	Videos           []domain.Video      // GetVideos が探す動画
 	ListErr          error               // ListPlaylistVideoIDs が返すエラー
 	GetErr           error               // GetVideos が返すエラー
+
+	Inserted     []InsertedVideo // InsertVideo に渡されたもの
+	InsertResult domain.Video    // InsertVideo が返す動画
+	InsertErr    error           // InsertVideo が返すエラー（InsertResult より優先）
+
+	Thumbnails   []SetThumbnailCall // SetThumbnail に渡されたもの
+	ThumbnailErr error              // SetThumbnail が返すエラー
+}
+
+// InsertedVideo は、InsertVideo に渡されたもの。
+type InsertedVideo struct {
+	Meta video.Meta
+	Body string
+	Size int64
+}
+
+// SetThumbnailCall は、SetThumbnail に渡されたもの。
+type SetThumbnailCall struct {
+	VideoID  string
+	Image    string
+	MimeType string
 }
 
 // MyChannel は、ChannelErr があればそれを、なければ Channel を返す。
@@ -54,6 +78,34 @@ func (f *YouTube) GetVideos(_ context.Context, ids []string) ([]domain.Video, er
 	return out, nil
 }
 
+// InsertVideo は、渡されたものを記録し、中身を読み終えたら progress に知らせて、InsertErr か InsertResult を返す。
+func (f *YouTube) InsertVideo(_ context.Context, m video.Meta, body io.Reader, size int64, progress func(sent int64)) (domain.Video, error) {
+	f.Calls = append(f.Calls, "InsertVideo")
+	b, err := io.ReadAll(body)
+	if err != nil {
+		return domain.Video{}, err
+	}
+	f.Inserted = append(f.Inserted, InsertedVideo{Meta: m, Body: string(b), Size: size})
+	if f.InsertErr != nil {
+		return domain.Video{}, f.InsertErr
+	}
+	if progress != nil {
+		progress(size)
+	}
+	return f.InsertResult, nil
+}
+
+// SetThumbnail は、渡されたものを記録し、ThumbnailErr を返す。
+func (f *YouTube) SetThumbnail(_ context.Context, videoID string, img io.Reader, mimeType string) error {
+	f.Calls = append(f.Calls, "SetThumbnail")
+	b, err := io.ReadAll(img)
+	if err != nil {
+		return err
+	}
+	f.Thumbnails = append(f.Thumbnails, SetThumbnailCall{VideoID: videoID, Image: string(b), MimeType: mimeType})
+	return f.ThumbnailErr
+}
+
 // Opener は、yt を返す YouTubeOpener を作る。
 func Opener(yt usecase.YouTube) usecase.YouTubeOpener {
 	return func(context.Context) (usecase.YouTube, error) { return yt, nil }
@@ -87,19 +139,29 @@ func (s *State) SetChannel(ch domain.Channel) error {
 	return nil
 }
 
-// Locker は、何もしない Locker。ロックの回数を数える。
+// Locker は、ロックの回数を数える偽の Locker。
+// 本物のロック（ファイルのロック）は、同じプロセスからでも、ロック中にもう一度ロックすると待ち続ける。
+// 偽物では待つ代わりに ErrRelocked を返し、ロック中にロックを取るもの（Catalog など）を呼んでしまう誤りを見つける。
 type Locker struct {
 	Locks   int
 	LockErr error // Lock が返すエラー
+	held    bool
 }
 
-// Lock は、回数を数えるだけで、すぐに返す。
+// ErrRelocked は、ロック中にもう一度ロックしようとしたときに Locker が返すエラー。
+var ErrRelocked = errors.New("ロック中にもう一度ロックしようとしました（本物のロックなら待ち続けます）")
+
+// Lock は、回数を数えて、すぐに返す。ロック中なら ErrRelocked を返す。
 func (l *Locker) Lock(context.Context) (func(), error) {
 	if l.LockErr != nil {
 		return nil, l.LockErr
 	}
+	if l.held {
+		return nil, ErrRelocked
+	}
 	l.Locks++
-	return func() {}, nil
+	l.held = true
+	return func() { l.held = false }, nil
 }
 
 // Ledger は、メモリ上の Ledger。
@@ -108,6 +170,7 @@ type Ledger struct {
 	PlaylistList []usecase.LedgerPlaylist
 	Clears       int   // Clear を呼んだ回数
 	ClearErr     error // Clear が返すエラー（空にしない）
+	AddErr       error // AddVideo が返すエラー（足さない）
 }
 
 // Videos は、記録した動画を返す。
@@ -115,6 +178,9 @@ func (l *Ledger) Videos() ([]usecase.LedgerVideo, error) { return l.VideoList, n
 
 // AddVideo は、同じ ID がなければ動画を足す。
 func (l *Ledger) AddVideo(v usecase.LedgerVideo) error {
+	if l.AddErr != nil {
+		return l.AddErr
+	}
 	for _, x := range l.VideoList {
 		if x.ID == v.ID {
 			return nil

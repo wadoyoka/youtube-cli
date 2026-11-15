@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"runtime"
@@ -56,6 +57,7 @@ func run(ctx context.Context) int {
 		Logout: account.Logout{Auth: authn},
 		Status: status,
 		List:   video.List{Remote: remote},
+		Upload: video.Upload{Remote: remote, Open: openFile},
 		Policy: policy,
 		Setup: setup.Setup{
 			Init:    initUC,
@@ -69,8 +71,26 @@ func run(ctx context.Context) int {
 		},
 		WindowsPaths: onWindows,
 		Interactive:  terminal.IsTerminal(os.Stdin) && terminal.IsTerminal(os.Stderr),
+		Progress:     terminal.IsTerminal(os.Stderr) && terminal.EnableVT(os.Stderr),
 		Stdin:        os.Stdin,
 		Stdout:       os.Stdout,
 		Stderr:       os.Stderr,
 	}, os.Args[1:])
+}
+
+// openFile は、手元のファイルを開き、大きさとともに返す（video.Upload の Open）。ディレクトリは開かない。
+func openFile(path string) (io.ReadCloser, int64, error) {
+	f, err := os.Open(path) //nolint:gosec // 利用者が引数で指定した、上げるファイル
+	if err != nil {
+		return nil, 0, err
+	}
+	info, err := f.Stat()
+	if err == nil && info.IsDir() {
+		err = fmt.Errorf("%s はディレクトリです", path)
+	}
+	if err != nil {
+		_ = f.Close()
+		return nil, 0, err
+	}
+	return f, info.Size(), nil
 }

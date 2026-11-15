@@ -93,3 +93,57 @@ func TestErrorKind(t *testing.T) {
 		}
 	})
 }
+
+func TestUploadUncertain(t *testing.T) {
+	t.Run("原因を付けても ErrUploadUncertain と見分けられ、終了コードは 1", func(t *testing.T) {
+		// Arrange
+		cause := errors.New("接続が切れた")
+
+		// Act
+		err := fmt.Errorf("x: %w", UploadUncertain(cause))
+
+		// Assert
+		if !errors.Is(err, ErrUploadUncertain) || !errors.Is(err, cause) {
+			t.Errorf("errors.Is が見分けられない: %v", err)
+		}
+		if KindOf(err) != KindUnexpected || KindOf(err).ExitCode() != 1 {
+			t.Errorf("kind = %v", KindOf(err))
+		}
+		want := "アップロードの結果が分かりません。Studio で確かめてから、同じコマンドに --skip-existing を付けてやり直してください"
+		if de, ok := errors.AsType[*Error](err); !ok || de.Message != want {
+			t.Errorf("err = %v", err)
+		}
+	})
+
+	t.Run("原因を付けても ErrUploadUncertain そのものは変わらない", func(t *testing.T) {
+		// Arrange
+		before := *ErrUploadUncertain
+
+		// Act
+		_ = UploadUncertain(errors.New("原因"))
+
+		// Assert
+		if ErrUploadUncertain.Err != nil || ErrUploadUncertain.Message != before.Message {
+			t.Errorf("ErrUploadUncertain = %+v", ErrUploadUncertain)
+		}
+	})
+
+	t.Run("種類か本文の違う Error は ErrUploadUncertain ではない", func(t *testing.T) {
+		// Arrange
+		errs := []error{
+			Errorf(KindUnexpected, "YouTube の操作に失敗しました"),
+			Errorf(KindConflict, "%s", ErrUploadUncertain.Message),
+			errors.New(ErrUploadUncertain.Message),
+		}
+
+		for _, err := range errs {
+			// Act
+			got := errors.Is(err, ErrUploadUncertain)
+
+			// Assert
+			if got {
+				t.Errorf("%v を ErrUploadUncertain と見なした", err)
+			}
+		}
+	})
+}

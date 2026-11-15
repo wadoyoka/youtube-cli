@@ -1,12 +1,20 @@
 package youtubeapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,6 +23,7 @@ import (
 	"google.golang.org/api/youtube/v3"
 
 	"github.com/wadoyoka/youtube-cli/internal/domain"
+	"github.com/wadoyoka/youtube-cli/internal/domain/video"
 )
 
 func newTestClient(t *testing.T, h http.HandlerFunc) *Client {
@@ -205,6 +214,457 @@ func TestGetVideos(t *testing.T) {
 		// Assert
 		if err != nil || len(got) != 0 || calls.Load() != 0 {
 			t.Errorf("got=%v err=%v calls=%d", got, err, calls.Load())
+		}
+	})
+}
+
+// sentRequest は、偽の YouTube が受け取った要求。
+type sentRequest struct {
+	header http.Header
+	query  url.Values
+	body   []byte
+}
+
+// uploadServer は、InsertVideo を試すための偽の YouTube。
+// 動画を上げる最初の要求（/upload/youtube/v3/videos）には starts の順に、
+// 再開可能アップロードの続き（/upload/session）には chunks の順に応える。尽きたら最後のものを使う。
+type uploadServer struct {
+	mu      sync.Mutex
+	starts  []http.HandlerFunc
+	chunks  []http.HandlerFunc
+	started []sentRequest
+	chunked []sentRequest
+}
+
+func (s *uploadServer) handle(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	req := sentRequest{header: r.Header.Clone(), query: r.URL.Query(), body: body}
+	s.mu.Lock()
+	var respond http.HandlerFunc
+	if strings.HasPrefix(r.URL.Path, "/upload/session") {
+		s.chunked = append(s.chunked, req)
+		respond = s.chunks[min(len(s.chunked), len(s.chunks))-1]
+	} else {
+		s.started = append(s.started, req)
+		respond = s.starts[min(len(s.started), len(s.starts))-1]
+	}
+	s.mu.Unlock()
+	respond(w, r)
+}
+
+// startReqs は、受け取った最初の要求（動画を上げる要求）を返す。
+func (s *uploadServer) startReqs() []sentRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.started)
+}
+
+// chunkReqs は、受け取った再開可能アップロードの続きの要求を返す。
+func (s *uploadServer) chunkReqs() []sentRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.chunked)
+}
+
+// created は、ID が id の動画を作った応答を返す。
+func created(id string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":      id,
+			"snippet": map[string]any{"title": "題", "tags": []string{"go", "youtube-cli"}},
+			"status":  map[string]any{"privacyStatus": "unlisted", "uploadStatus": "uploaded"},
+		})
+	}
+}
+
+// refused は、code と reason で断る応答を返す。
+func refused(code int, reason string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(code)
+		_, _ = fmt.Fprintf(w, `{"error":{"code":%d,"message":"x","errors":[{"reason":%q,"message":"x"}]}}`, code, reason)
+	}
+}
+
+// sessionStarted は、再開可能アップロードのセッションを作った応答を返す。続きの送り先には、知られると困る upload_id を入れる。
+func sessionStarted(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Location", "http://"+r.Host+"/upload/session?upload_id=SECRET")
+	w.WriteHeader(http.StatusOK)
+}
+
+// chunkAccepted は、再開可能アップロードの途中の塊を受け取った応答（308 の代わり）を返す。
+func chunkAccepted(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("X-Http-Status-Code-Override", "308")
+	w.WriteHeader(http.StatusOK)
+}
+
+// hangUp は、要求を読み終えたあと、応えずに接続を切る。
+func hangUp(w http.ResponseWriter, _ *http.Request) {
+	conn, _, err := w.(http.Hijacker).Hijack()
+	if err == nil {
+		_ = conn.Close()
+	}
+}
+
+// metadataOf は、最初の要求で送った動画の項目（JSON）を返す。multipart なら最初の部分を読む。
+func metadataOf(t *testing.T, r sentRequest) map[string]any {
+	t.Helper()
+	data := r.body
+	mt, params, err := mime.ParseMediaType(r.header.Get("Content-Type"))
+	if err == nil && strings.HasPrefix(mt, "multipart/") {
+		part, err := multipart.NewReader(bytes.NewReader(r.body), params["boundary"]).NextPart()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if data, err = io.ReadAll(part); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("json: %v: %q", err, data)
+	}
+	return m
+}
+
+func newUploadClient(t *testing.T, s *uploadServer) (*Client, *[]time.Duration) {
+	t.Helper()
+	c := newTestClient(t, s.handle)
+	slept := &[]time.Duration{}
+	c.sleep = func(d time.Duration) { *slept = append(*slept, d) }
+	return c, slept
+}
+
+// onlyReader は、io.Seeker を隠した Reader。
+type onlyReader struct{ r io.Reader }
+
+func (o onlyReader) Read(p []byte) (int, error) { return o.r.Read(p) }
+
+func TestInsertVideo(t *testing.T) {
+	meta := video.Meta{Title: "題", Description: "説明", Tags: []string{"go"}, CategoryID: video.DefaultCategory}
+	const small = "small-video"
+	large := bytes.Repeat([]byte("v"), uploadChunk+1)
+
+	t.Run("限定公開に固定し、申告を明示して、目印のタグを付けて送る", func(t *testing.T) {
+		// Arrange
+		s := &uploadServer{starts: []http.HandlerFunc{created("vid1")}}
+		c, _ := newUploadClient(t, s)
+
+		// Act
+		got, err := c.InsertVideo(context.Background(), meta, strings.NewReader(small), int64(len(small)), nil)
+
+		// Assert
+		if err != nil || got.ID != "vid1" || got.PrivacyStatus != "unlisted" || got.UploadStatus != "uploaded" {
+			t.Fatalf("got=%+v err=%v", got, err)
+		}
+		if len(s.startReqs()) != 1 {
+			t.Fatalf("要求の数=%d", len(s.startReqs()))
+		}
+		req := s.startReqs()[0]
+		if strings.Join(req.query["part"], ",") != "snippet,status" || !bytes.Contains(req.body, []byte(small)) {
+			t.Errorf("query=%v body=%q", req.query, req.body)
+		}
+		md := metadataOf(t, req)
+		status, _ := md["status"].(map[string]any)
+		if status["privacyStatus"] != "unlisted" {
+			t.Errorf("status=%v", status)
+		}
+		for _, k := range []string{"selfDeclaredMadeForKids", "containsSyntheticMedia"} {
+			if v, ok := status[k]; !ok || v != false {
+				t.Errorf("status.%s=%v（送ったか: %v）", k, v, ok)
+			}
+		}
+		snippet, _ := md["snippet"].(map[string]any)
+		tags, _ := snippet["tags"].([]any)
+		if snippet["title"] != "題" || snippet["description"] != "説明" || snippet["categoryId"] != "22" || !slices.Equal(tags, []any{"go", "youtube-cli"}) {
+			t.Errorf("snippet=%v", snippet)
+		}
+	})
+
+	t.Run("子ども向けと合成の申告は true で送る", func(t *testing.T) {
+		// Arrange
+		s := &uploadServer{starts: []http.HandlerFunc{created("vid1")}}
+		c, _ := newUploadClient(t, s)
+		m := meta
+		m.MadeForKids, m.SyntheticMedia = true, true
+
+		// Act
+		_, err := c.InsertVideo(context.Background(), m, strings.NewReader(small), int64(len(small)), nil)
+		// Assert
+		if err != nil {
+			t.Fatal(err)
+		}
+		status, _ := metadataOf(t, s.startReqs()[0])["status"].(map[string]any)
+		if status["selfDeclaredMadeForKids"] != true || status["containsSyntheticMedia"] != true || status["privacyStatus"] != "unlisted" {
+			t.Errorf("status=%v", status)
+		}
+	})
+
+	t.Run("16 MiB を超える動画は、再開可能アップロードで 16 MiB ずつ送り、進み具合を知らせる", func(t *testing.T) {
+		// Arrange
+		s := &uploadServer{
+			starts: []http.HandlerFunc{sessionStarted},
+			chunks: []http.HandlerFunc{chunkAccepted, created("vid2")},
+		}
+		c, _ := newUploadClient(t, s)
+		var reported []int64
+
+		// Act
+		got, err := c.InsertVideo(context.Background(), meta, bytes.NewReader(large), int64(len(large)), func(n int64) { reported = append(reported, n) })
+
+		// Assert
+		if err != nil || got.ID != "vid2" {
+			t.Fatalf("got=%+v err=%v", got, err)
+		}
+		if len(s.startReqs()) != 1 || s.startReqs()[0].query.Get("uploadType") != "resumable" {
+			t.Fatalf("最初の要求=%d %v", len(s.startReqs()), s.startReqs())
+		}
+		if status, _ := metadataOf(t, s.startReqs()[0])["status"].(map[string]any); status["privacyStatus"] != "unlisted" {
+			t.Errorf("status=%v", status)
+		}
+		var ranges []string
+		for _, r := range s.chunkReqs() {
+			ranges = append(ranges, r.header.Get("Content-Range"))
+		}
+		want := []string{fmt.Sprintf("bytes 0-%d/*", uploadChunk-1), fmt.Sprintf("bytes %d-%d/%d", uploadChunk, uploadChunk, uploadChunk+1)}
+		if !slices.Equal(ranges, want) {
+			t.Errorf("ranges=%v want=%v", ranges, want)
+		}
+		if len(reported) == 0 || reported[0] != 0 || !slices.Contains(reported, int64(uploadChunk)) || reported[len(reported)-1] != int64(len(large)) {
+			t.Errorf("reported=%v", reported)
+		}
+	})
+
+	t.Run("送信を始める前に 429 で断られたら、待って最初から送り直し、1 つだけ作る", func(t *testing.T) {
+		// Arrange
+		s := &uploadServer{starts: []http.HandlerFunc{refused(http.StatusTooManyRequests, "rateLimitExceeded"), created("vid3")}}
+		c, slept := newUploadClient(t, s)
+		var reported []int64
+
+		// Act
+		got, err := c.InsertVideo(context.Background(), meta, strings.NewReader(small), int64(len(small)), func(n int64) { reported = append(reported, n) })
+
+		// Assert
+		if err != nil || got.ID != "vid3" {
+			t.Fatalf("got=%+v err=%v", got, err)
+		}
+		if len(s.startReqs()) != 2 || !bytes.Contains(s.startReqs()[1].body, []byte(small)) {
+			t.Errorf("要求=%d", len(s.startReqs()))
+		}
+		if !slices.Equal(*slept, []time.Duration{time.Second}) {
+			t.Errorf("slept=%v", *slept)
+		}
+		if !slices.Equal(reported, []int64{0, 0, int64(len(small))}) {
+			t.Errorf("送り直すときは進み具合を 0 に戻すはず: reported=%v", reported)
+		}
+	})
+
+	t.Run("再開可能アップロードを始める要求が 503 で断られたら、中身は送っていないので送り直す", func(t *testing.T) {
+		// Arrange
+		s := &uploadServer{
+			starts: []http.HandlerFunc{refused(http.StatusServiceUnavailable, "backendError"), sessionStarted},
+			chunks: []http.HandlerFunc{chunkAccepted, created("vid4")},
+		}
+		c, slept := newUploadClient(t, s)
+
+		// Act
+		got, err := c.InsertVideo(context.Background(), meta, bytes.NewReader(large), int64(len(large)), nil)
+
+		// Assert
+		if err != nil || got.ID != "vid4" {
+			t.Fatalf("got=%+v err=%v", got, err)
+		}
+		if len(s.startReqs()) != 2 || len(s.chunkReqs()) != 2 || !slices.Equal(*slept, []time.Duration{time.Second}) {
+			t.Errorf("最初の要求=%d 続き=%d slept=%v", len(s.startReqs()), len(s.chunkReqs()), *slept)
+		}
+	})
+
+	t.Run("中身を送ったあとで接続が切れたら、送り直さずに ErrUploadUncertain を返す", func(t *testing.T) {
+		// Arrange
+		s := &uploadServer{starts: []http.HandlerFunc{hangUp, created("dup")}}
+		c, slept := newUploadClient(t, s)
+
+		// Act
+		_, err := c.InsertVideo(context.Background(), meta, strings.NewReader(small), int64(len(small)), nil)
+
+		// Assert
+		if !errors.Is(err, domain.ErrUploadUncertain) || domain.KindOf(err) != domain.KindUnexpected {
+			t.Fatalf("err=%v", err)
+		}
+		if len(s.startReqs()) != 1 || len(*slept) != 0 {
+			t.Errorf("送り直さないはず: 要求=%d slept=%v", len(s.startReqs()), *slept)
+		}
+	})
+
+	t.Run("再開可能アップロードの途中で接続が切れたら、送り直さずに ErrUploadUncertain を返す", func(t *testing.T) {
+		// Arrange
+		s := &uploadServer{
+			starts: []http.HandlerFunc{sessionStarted},
+			chunks: []http.HandlerFunc{hangUp},
+		}
+		c, slept := newUploadClient(t, s)
+
+		// Act
+		_, err := c.InsertVideo(context.Background(), meta, bytes.NewReader(large), int64(len(large)), nil)
+
+		// Assert
+		if !errors.Is(err, domain.ErrUploadUncertain) || domain.KindOf(err) != domain.KindUnexpected {
+			t.Fatalf("err=%v", err)
+		}
+		if len(s.startReqs()) != 1 || len(*slept) != 0 {
+			t.Errorf("送り直さないはず: 最初の要求=%d slept=%v", len(s.startReqs()), *slept)
+		}
+		if strings.Contains(err.Error(), "SECRET") {
+			t.Errorf("upload_id を出してしまう: %v", err)
+		}
+	})
+
+	t.Run("中身を含む要求が 503 で終わったら、作られたかもしれないので送り直さない", func(t *testing.T) {
+		// Arrange
+		s := &uploadServer{starts: []http.HandlerFunc{refused(http.StatusServiceUnavailable, "backendError"), created("dup")}}
+		c, slept := newUploadClient(t, s)
+
+		// Act
+		_, err := c.InsertVideo(context.Background(), meta, strings.NewReader(small), int64(len(small)), nil)
+
+		// Assert
+		if !errors.Is(err, domain.ErrUploadUncertain) {
+			t.Fatalf("err=%v", err)
+		}
+		if len(s.startReqs()) != 1 || len(*slept) != 0 {
+			t.Errorf("要求=%d slept=%v", len(s.startReqs()), *slept)
+		}
+	})
+
+	t.Run("uploadLimitExceeded は KindQuota で、送り直さない", func(t *testing.T) {
+		// Arrange
+		s := &uploadServer{starts: []http.HandlerFunc{refused(http.StatusForbidden, "uploadLimitExceeded"), created("dup")}}
+		c, _ := newUploadClient(t, s)
+
+		// Act
+		_, err := c.InsertVideo(context.Background(), meta, strings.NewReader(small), int64(len(small)), nil)
+
+		// Assert
+		if domain.KindOf(err) != domain.KindQuota || errors.Is(err, domain.ErrUploadUncertain) {
+			t.Errorf("err=%v", err)
+		}
+		if len(s.startReqs()) != 1 {
+			t.Errorf("要求=%d", len(s.startReqs()))
+		}
+	})
+
+	t.Run("成功の応答に動画 ID がなければ ErrUploadUncertain を返す", func(t *testing.T) {
+		// Arrange
+		s := &uploadServer{starts: []http.HandlerFunc{created("")}}
+		c, _ := newUploadClient(t, s)
+
+		// Act
+		_, err := c.InsertVideo(context.Background(), meta, strings.NewReader(small), int64(len(small)), nil)
+
+		// Assert
+		if !errors.Is(err, domain.ErrUploadUncertain) || len(s.startReqs()) != 1 {
+			t.Errorf("err=%v 要求=%d", err, len(s.startReqs()))
+		}
+	})
+
+	t.Run("接続できなければ、何も送っていないので ErrUploadUncertain にしない", func(t *testing.T) {
+		// Arrange
+		srv := httptest.NewServer(http.NotFoundHandler())
+		srv.Close()
+		svc, err := youtube.NewService(context.Background(), option.WithHTTPClient(&http.Client{}), option.WithEndpoint(srv.URL))
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := NewClient(svc)
+		c.sleep = func(time.Duration) {}
+
+		// Act
+		_, err = c.InsertVideo(context.Background(), meta, strings.NewReader(small), int64(len(small)), nil)
+
+		// Assert
+		if err == nil || errors.Is(err, domain.ErrUploadUncertain) {
+			t.Errorf("err=%v", err)
+		}
+	})
+
+	t.Run("先頭に戻せない本文なら、429 でも送り直さない", func(t *testing.T) {
+		// Arrange
+		s := &uploadServer{starts: []http.HandlerFunc{refused(http.StatusTooManyRequests, "rateLimitExceeded"), created("vid5")}}
+		c, slept := newUploadClient(t, s)
+
+		// Act
+		_, err := c.InsertVideo(context.Background(), meta, onlyReader{strings.NewReader(small)}, int64(len(small)), nil)
+
+		// Assert
+		if err == nil || errors.Is(err, domain.ErrUploadUncertain) {
+			t.Fatalf("err=%v", err)
+		}
+		if len(s.startReqs()) != 1 || len(*slept) != 0 {
+			t.Errorf("要求=%d slept=%v", len(s.startReqs()), *slept)
+		}
+	})
+}
+
+func TestSetThumbnail(t *testing.T) {
+	t.Run("動画 ID を付けて画像を送る", func(t *testing.T) {
+		// Arrange
+		var path string
+		var got sentRequest
+		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			path, got = r.URL.Path, sentRequest{header: r.Header.Clone(), query: r.URL.Query(), body: body}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"items":[]}`))
+		})
+
+		// Act
+		err := c.SetThumbnail(context.Background(), "vid1", strings.NewReader("PNGDATA"), "image/png")
+		// Assert
+		if err != nil {
+			t.Fatal(err)
+		}
+		if path != "/upload/youtube/v3/thumbnails/set" || got.query.Get("videoId") != "vid1" {
+			t.Errorf("path=%s query=%v", path, got.query)
+		}
+		if !bytes.Contains(got.body, []byte("PNGDATA")) || !bytes.Contains(got.body, []byte("image/png")) {
+			t.Errorf("body=%q", got.body)
+		}
+	})
+
+	t.Run("503 は同じ画像で送り直す", func(t *testing.T) {
+		// Arrange
+		var bodies [][]byte
+		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			bodies = append(bodies, body)
+			if len(bodies) == 1 {
+				refused(http.StatusServiceUnavailable, "backendError")(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"items":[]}`))
+		})
+
+		// Act
+		err := c.SetThumbnail(context.Background(), "vid1", strings.NewReader("PNGDATA"), "image/png")
+
+		// Assert
+		if err != nil || len(bodies) != 2 || !bytes.Contains(bodies[1], []byte("PNGDATA")) {
+			t.Errorf("err=%v bodies=%d", err, len(bodies))
+		}
+	})
+
+	t.Run("403 のクォータ切れは KindQuota", func(t *testing.T) {
+		// Arrange
+		c := newTestClient(t, refused(http.StatusForbidden, "quotaExceeded"))
+
+		// Act
+		err := c.SetThumbnail(context.Background(), "vid1", strings.NewReader("PNGDATA"), "image/png")
+
+		// Assert
+		if domain.KindOf(err) != domain.KindQuota {
+			t.Errorf("err=%v", err)
 		}
 	})
 }

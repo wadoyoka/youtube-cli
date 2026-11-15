@@ -23,6 +23,7 @@ type Deps struct {
 	Status account.Status
 	Setup  setup.Setup
 	List   video.List
+	Upload video.Upload
 	Policy usecase.PolicyStore
 	Stdin  io.Reader
 	Stdout io.Writer
@@ -31,6 +32,8 @@ type Deps struct {
 	Interactive bool
 	// WindowsPaths は、Windows で動いているとき true。
 	WindowsPaths bool
+	// Progress は、送信の進み具合を標準エラーに出すとき true（標準エラーが端末で、ANSI の制御文字を使えるとき）。
+	Progress bool
 	// 後のタスクで、各 usecase のフィールドを足していく
 }
 
@@ -73,11 +76,7 @@ func newRootCommand(d Deps) *cobra.Command {
 			if slices.Contains(unchecked, cmd.Name()) {
 				return nil
 			}
-			p, err := d.Policy.Load()
-			if err != nil {
-				return err
-			}
-			return p.Check(cmd.Name())
+			return checkPolicy(d, cmd.Name())
 		},
 	}
 	root.SetIn(d.Stdin)
@@ -86,6 +85,21 @@ func newRootCommand(d Deps) *cobra.Command {
 	root.PersistentFlags().BoolVar(asJSON, "json", false, "結果を JSON で出す")
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usageError(err) })
 	root.AddCommand(newInitCommand(d, asJSON), newLoginCommand(d, asJSON), newLogoutCommand(d, asJSON),
-		newStatusCommand(d, asJSON), newSetupCommand(d, asJSON), newLsCommand(d, asJSON))
+		newStatusCommand(d, asJSON), newSetupCommand(d, asJSON), newLsCommand(d, asJSON), newUploadCommand(d, asJSON))
 	return root
+}
+
+// checkPolicy は、policy.toml を読み、names のどれかが拒否されていれば KindDenied を返す。
+// コマンドそのものはルートが確かめる。フラグで別の操作もするとき（upload --thumbnail など）は、その名前もここで確かめる。
+func checkPolicy(d Deps, names ...string) error {
+	p, err := d.Policy.Load()
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
+		if err := p.Check(name); err != nil {
+			return err
+		}
+	}
+	return nil
 }

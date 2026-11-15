@@ -9,6 +9,7 @@ import (
 
 	"github.com/wadoyoka/youtube-cli/internal/domain"
 	"github.com/wadoyoka/youtube-cli/internal/domain/policy"
+	"github.com/wadoyoka/youtube-cli/internal/domain/video"
 )
 
 // ConfigDir は、設定ディレクトリ。
@@ -66,6 +67,12 @@ type YouTube interface {
 	ListPlaylistVideoIDs(ctx context.Context, playlistID string) ([]string, error)
 	// GetVideos は、ID の動画を返す。見つからない ID は結果に入れない。
 	GetVideos(ctx context.Context, ids []string) ([]domain.Video, error)
+	// InsertVideo は、body（size バイト）を限定公開の動画として上げ、作った動画を返す。目印のタグは必ず付ける。
+	// 進み具合は progress（nil なら知らせない）に、送り終えたバイト数で知らせる。
+	// 送り始めたあとで動画 ID を受け取れなかったときは、送り直さずに domain.ErrUploadUncertain を返す。
+	InsertVideo(ctx context.Context, m video.Meta, body io.Reader, size int64, progress func(sent int64)) (domain.Video, error)
+	// SetThumbnail は、動画のサムネイルを img（MIME タイプは mimeType）にする。
+	SetThumbnail(ctx context.Context, videoID string, img io.Reader, mimeType string) error
 }
 
 // YouTubeOpener は、保存済みのトークンで YouTube を開く。

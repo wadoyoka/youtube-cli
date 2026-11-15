@@ -2,19 +2,33 @@
 package youtubeapi
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"io"
+	"net/http/httptrace"
 	"slices"
+	"strings"
+	"sync/atomic"
 	"time"
 
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 	"google.golang.org/api/youtube/v3"
 
 	"github.com/wadoyoka/youtube-cli/internal/domain"
+	"github.com/wadoyoka/youtube-cli/internal/domain/video"
 	"github.com/wadoyoka/youtube-cli/internal/repository/auth"
 	"github.com/wadoyoka/youtube-cli/internal/usecase"
 )
 
-const maxAttempts = 5
+const (
+	maxAttempts = 5
+	// uploadChunk は、再開可能アップロードで 1 回に送る大きさ（16 MiB）。これより小さい動画は、ライブラリが 1 回の要求（multipart）で送る。
+	uploadChunk = 16 << 20
+	// chunkRetry は、再開可能アップロードの塊 1 つを、ライブラリが送り直し続ける時間の上限。
+	chunkRetry = 2 * time.Minute
+)
 
 // Client は、youtube/v3 で usecase.YouTube を実装する。
 type Client struct {
@@ -131,4 +145,133 @@ func toVideo(it *youtube.Video) domain.Video {
 		v.PrivacyStatus, v.UploadStatus = s.PrivacyStatus, s.UploadStatus
 	}
 	return v
+}
+
+// InsertVideo は、body（size バイト）を限定公開の動画として上げ、作った動画を返す。目印のタグは必ず付ける。
+// uploadChunk 以上の動画は再開可能アップロードで分けて送り、送り始めたあとの塊ごとの一時的な失敗は、
+// ライブラリが同じセッションの続きから送り直す（chunkRetry まで）。
+//
+// 失敗したとき、最初から新しく上げ直すのは、動画ができていないと言い切れるとき（sendWatch.maybeCreated が false）だけ。
+// そのうえで、混み合いなどのやり直せる失敗で、body が io.Seeker で先頭に戻せれば、1s、2s、4s、8s と待って最大 attempts 回まで送り直す。
+// 動画ができたかもしれないときは、二重に上げないよう送り直さずに domain.ErrUploadUncertain を返す。
+func (c *Client) InsertVideo(ctx context.Context, m video.Meta, body io.Reader, size int64, progress func(sent int64)) (domain.Video, error) {
+	report := func(sent int64) {
+		if progress != nil {
+			progress(sent)
+		}
+	}
+	seeker, seekable := body.(io.Seeker)
+	for attempt := 1; ; attempt++ {
+		report(0)
+		var w sendWatch
+		res, err := c.insertOnce(w.watch(ctx), m, body, progress)
+		if err == nil && res.Id != "" {
+			report(size)
+			return toVideo(res), nil
+		}
+		if err == nil {
+			return domain.Video{}, domain.UploadUncertain(errors.New("YouTube の応答に動画 ID がありません"))
+		}
+		if w.maybeCreated(err) {
+			redactURL(err)
+			return domain.Video{}, domain.UploadUncertain(err)
+		}
+		if !isRetryable(err) || !seekable || attempt >= c.attempts || ctx.Err() != nil {
+			return domain.Video{}, mapError(err)
+		}
+		c.sleep(backoff(attempt))
+		if _, serr := seeker.Seek(0, io.SeekStart); serr != nil {
+			return domain.Video{}, domain.Errorf(domain.KindUnexpected, "動画のファイルを最初から読み直せません").Wrap(serr)
+		}
+	}
+}
+
+// insertOnce は、Videos.Insert を 1 回呼ぶ。公開範囲は限定公開に固定する。子ども向けと合成の申告は、
+// false でも ForceSendFields で明示して送る（省くと JSON から落ち、申告しなかったことになるため）。
+func (c *Client) insertOnce(ctx context.Context, m video.Meta, body io.Reader, progress func(sent int64)) (*youtube.Video, error) {
+	v := &youtube.Video{
+		Snippet: &youtube.VideoSnippet{
+			Title:       m.Title,
+			Description: m.Description,
+			Tags:        video.WithMarker(m.Tags),
+			CategoryId:  m.CategoryID,
+		},
+		Status: &youtube.VideoStatus{
+			PrivacyStatus:           video.PrivacyUnlisted,
+			SelfDeclaredMadeForKids: m.MadeForKids,
+			ContainsSyntheticMedia:  m.SyntheticMedia,
+			ForceSendFields:         []string{"SelfDeclaredMadeForKids", "ContainsSyntheticMedia"},
+		},
+	}
+	call := c.svc.Videos.Insert([]string{"snippet", "status"}, v).
+		Media(body, googleapi.ChunkSize(uploadChunk), googleapi.ChunkRetryDeadline(chunkRetry)).
+		Context(ctx)
+	if progress != nil {
+		call = call.ProgressUpdater(func(current, _ int64) { progress(current) })
+	}
+	return call.Do()
+}
+
+// sendWatch は、Videos.Insert の Do を 1 回呼ぶ間に YouTube へ書いた要求を、net/http/httptrace で見張る。
+// 失敗したとき、YouTube に動画ができたかもしれないかを見分けるために使う。
+//
+// Do の中の要求の流れは、動画の大きさで 2 通りある。
+//   - uploadChunk より小さい: 動画の項目と中身を、1 回の要求（multipart）で送る
+//   - uploadChunk 以上: まず項目だけの要求で再開可能アップロードのセッションを作り（X-Upload-Content-Type ヘッダーが付く）、
+//     応答の Location へ、中身を塊ごとの要求で送る
+//
+// 要求の数は、ヘッダーを書き終えた回数（WroteHeaders）で数える。net/http が使い古しの接続で失敗した要求を
+// 内部で送り直したときは多めに数えるが、多めに数えても「できたかもしれない」側に倒れるだけで、二重には上げない。
+type sendWatch struct {
+	wrote   atomic.Int32 // ヘッダーを書き終えた要求の数
+	session atomic.Bool  // 最初の要求が、セッションを作る要求（動画の中身を含まない）だった
+}
+
+// watch は、ctx に見張りを付けて返す。
+func (w *sendWatch) watch(ctx context.Context) context.Context {
+	return httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		WroteHeaderField: func(key string, _ []string) {
+			if w.wrote.Load() == 0 && strings.EqualFold(key, "X-Upload-Content-Type") {
+				w.session.Store(true)
+			}
+		},
+		WroteHeaders: func() { w.wrote.Add(1) },
+	})
+}
+
+// maybeCreated は、Do が err で失敗したとき、YouTube に動画ができたかもしれないかを返す。
+// できていないと言い切れるのは、次の 2 つのときだけ。
+//   - 要求を 1 つも書いていない（接続できなかった、トークンを更新できなかったなど）。
+//   - 書いた要求は最初の 1 つだけで、YouTube がそれに失敗の状態コードで応えた（err が googleapi.Error）。
+//     ただし中身を含む要求（multipart）なら 4xx のときだけ。5xx は、作ったあとで失敗したのかもしれない。
+//     セッションを作る要求は中身を含まず、断られればセッションの送り先も受け取っていないので、5xx でも何もできていない。
+//
+// 2 つ目の要求を書いた（セッションができて中身を送り始めた）とき、最初の要求の応答を受け取れなかった（接続が切れたなど）とき、
+// セッションを作れたのに続きを書く前に失敗したとき、成功の応答を読めなかったときは、できたかもしれない。
+// 2 つ目以降の要求への応答は 2 つ目の要求を書いたあとにしか来ないので、要求が 1 つのときの googleapi.Error は最初の要求への応答。
+func (w *sendWatch) maybeCreated(err error) bool {
+	switch w.wrote.Load() {
+	case 0:
+		return false
+	case 1:
+		gerr, ok := errors.AsType[*googleapi.Error](err)
+		if !ok {
+			return true
+		}
+		return !w.session.Load() && gerr.Code >= 500
+	default:
+		return true
+	}
+}
+
+// SetThumbnail は、動画のサムネイルを img にする。やり直すときに同じ画像を送れるよう、先に読み込む（画像は 2 MiB まで）。
+func (c *Client) SetThumbnail(ctx context.Context, videoID string, img io.Reader, mimeType string) error {
+	data, err := io.ReadAll(img)
+	if err != nil {
+		return domain.Errorf(domain.KindUnexpected, "サムネイルの画像を読めません").Wrap(err)
+	}
+	return c.do(ctx, func() error {
+		_, err := c.svc.Thumbnails.Set(videoID).Media(bytes.NewReader(data), googleapi.ContentType(mimeType)).Context(ctx).Do()
+		return err
+	})
 }
