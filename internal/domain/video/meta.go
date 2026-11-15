@@ -47,6 +47,10 @@ func ValidateMeta(m Meta) error {
 	if len(m.Description) > maxDescBytes {
 		return domain.Errorf(domain.KindUsage, "説明は %d バイト以内にしてください", maxDescBytes)
 	}
+	// YouTube は < と > を含む説明を、動画を送り終えたあとで 400 で断る。送る前に止める。
+	if strings.ContainsAny(m.Description, "<>") {
+		return domain.Errorf(domain.KindUsage, "説明に < と > は使えません（-> や <- も使えません）")
+	}
 	if tagsLength(m.Tags) > maxTagsLength {
 		return domain.Errorf(domain.KindUsage, "タグの合計は %d 文字以内にしてください", maxTagsLength)
 	}

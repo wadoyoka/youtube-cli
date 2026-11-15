@@ -19,6 +19,8 @@ func TestValidateMeta(t *testing.T) {
 		{"101文字のタイトルは使い方の誤り", video.Meta{Title: strings.Repeat("あ", 101)}, true},
 		{"小なり記号を含むタイトルは使い方の誤り", video.Meta{Title: "a<b"}, true},
 		{"大なり記号を含むタイトルは使い方の誤り", video.Meta{Title: "a>b"}, true},
+		{"小なり記号を含む説明は使い方の誤り", video.Meta{Title: "t", Description: "a <- b"}, true},
+		{"大なり記号を含む説明は使い方の誤り", video.Meta{Title: "t", Description: "a -> b"}, true},
 		{"5000バイトの説明は通る", video.Meta{Title: "t", Description: strings.Repeat("a", 5000)}, false},
 		{"5001バイトの説明は使い方の誤り", video.Meta{Title: "t", Description: strings.Repeat("a", 5001)}, true},
 		{"タグの合計が500ちょうどは通る", video.Meta{Title: "t", Tags: []string{strings.Repeat("a", 250), strings.Repeat("b", 249)}}, false},
