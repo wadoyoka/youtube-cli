@@ -334,3 +334,162 @@ func TestUpload(t *testing.T) {
 		}
 	})
 }
+
+// cliPlaylist は、このツールで作った（説明の最後に目印がある）限定公開の再生リスト。
+func cliPlaylist(id, title string) domain.Playlist {
+	return domain.Playlist{ID: id, Title: title, Description: dv.AddPlaylistMarker(""), PrivacyStatus: dv.PrivacyUnlisted}
+}
+
+func TestUploadPlaylist(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("再生リストを指定すると、上げてサムネイルを設定したあとで入れる", func(t *testing.T) {
+		// Arrange
+		yt := listed()
+		yt.Playlists = []domain.Playlist{cliPlaylist("PL1", "Go 入門")}
+		yt.InsertResult = cliVideo("new1", "intro", "uploaded")
+		u, _ := newUpload(yt, &usecasetest.Ledger{})
+
+		// Act
+		res, err := u.Run(ctx, video.UploadInput{Path: "/v/intro.mp4", ThumbnailPath: "/v/thumb.png", PlaylistRef: "Go 入門"})
+
+		// Assert
+		if err != nil || res.Playlist != (video.StepResult{Done: true}) || res.Thumbnail != (video.StepResult{Done: true}) {
+			t.Fatalf("res=%+v err=%v", res, err)
+		}
+		if !slices.Equal(yt.AddedToPlaylist, []usecasetest.AddToPlaylistCall{{PlaylistID: "PL1", VideoID: "new1"}}) {
+			t.Errorf("added=%v", yt.AddedToPlaylist)
+		}
+		if i, j := slices.Index(yt.Calls, "InsertVideo"), slices.Index(yt.Calls, "AddToPlaylist"); i < 0 || j < i {
+			t.Errorf("上げたあとで入れるはず: calls=%v", yt.Calls)
+		}
+	})
+
+	t.Run("再生リストを指定しなければ、再生リストに触れない", func(t *testing.T) {
+		// Arrange
+		yt := listed()
+		yt.InsertResult = cliVideo("new1", "intro", "uploaded")
+		u, _ := newUpload(yt, &usecasetest.Ledger{})
+
+		// Act
+		res, err := u.Run(ctx, video.UploadInput{Path: "/v/intro.mp4"})
+
+		// Assert
+		if err != nil || res.Playlist != (video.StepResult{}) || count(yt.Calls, "ListMyPlaylists") != 0 || count(yt.Calls, "AddToPlaylist") != 0 {
+			t.Errorf("res=%+v err=%v calls=%v", res, err, yt.Calls)
+		}
+	})
+
+	t.Run("再生リストの確かめで失敗したら、上げる前に止まり InsertVideo を呼ばない", func(t *testing.T) {
+		public := cliPlaylist("PL1", "公開")
+		public.PrivacyStatus = "public"
+		cases := []struct {
+			name string
+			ref  string
+			want domain.ErrorKind
+		}{
+			{"public の再生リストは KindDenied", "公開", domain.KindDenied},
+			{"見つからなければ KindNotFound", "ない", domain.KindNotFound},
+			{"目印のない再生リストは KindNotFound", "手で作った", domain.KindNotFound},
+			{"同じ名前の CLI 再生リストが2つあれば KindAmbiguous", "同じ", domain.KindAmbiguous},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				// Arrange
+				yt := listed()
+				yt.Playlists = []domain.Playlist{
+					public,
+					{ID: "PLhand", Title: "手で作った", PrivacyStatus: dv.PrivacyUnlisted},
+					cliPlaylist("PL2", "同じ"), cliPlaylist("PL3", "同じ"),
+				}
+				yt.InsertResult = cliVideo("new1", "intro", "uploaded")
+				u, _ := newUpload(yt, &usecasetest.Ledger{})
+
+				// Act
+				_, err := u.Run(ctx, video.UploadInput{Path: "/v/intro.mp4", PlaylistRef: tc.ref})
+
+				// Assert
+				if domain.KindOf(err) != tc.want {
+					t.Errorf("err=%v kind=%v want=%v", err, domain.KindOf(err), tc.want)
+				}
+				if count(yt.Calls, "InsertVideo") != 0 || count(yt.Calls, "AddToPlaylist") != 0 {
+					t.Errorf("calls=%v", yt.Calls)
+				}
+			})
+		}
+	})
+
+	t.Run("SkipExisting で既存の動画が再生リストに入っていなければ入れる", func(t *testing.T) {
+		// Arrange
+		yt := listed(cliVideo("old1", "intro", "processed"))
+		yt.Playlists = []domain.Playlist{cliPlaylist("PL1", "Go 入門")}
+		u, _ := newUpload(yt, &usecasetest.Ledger{})
+
+		// Act
+		res, err := u.Run(ctx, video.UploadInput{Path: "/v/intro.mp4", PlaylistRef: "PL1", SkipExisting: true})
+
+		// Assert
+		if err != nil || !res.Existing || res.Playlist != (video.StepResult{Done: true}) || count(yt.Calls, "InsertVideo") != 0 {
+			t.Fatalf("res=%+v err=%v calls=%v", res, err, yt.Calls)
+		}
+		if !slices.Equal(yt.AddedToPlaylist, []usecasetest.AddToPlaylistCall{{PlaylistID: "PL1", VideoID: "old1"}}) {
+			t.Errorf("added=%v", yt.AddedToPlaylist)
+		}
+	})
+
+	t.Run("SkipExisting で既存の動画がすでに再生リストに入っていれば、何もせず Done", func(t *testing.T) {
+		// Arrange
+		yt := listed(cliVideo("old1", "intro", "processed"))
+		yt.Playlists = []domain.Playlist{cliPlaylist("PL1", "Go 入門")}
+		yt.PlaylistVideoIDs["PL1"] = []string{"old1"}
+		u, _ := newUpload(yt, &usecasetest.Ledger{})
+
+		// Act
+		res, err := u.Run(ctx, video.UploadInput{Path: "/v/intro.mp4", PlaylistRef: "PL1", SkipExisting: true})
+
+		// Assert
+		if err != nil || res.Playlist != (video.StepResult{Done: true}) || count(yt.Calls, "AddToPlaylist") != 0 {
+			t.Errorf("res=%+v err=%v calls=%v", res, err, yt.Calls)
+		}
+	})
+
+	t.Run("再生リストに入れるのに失敗したら、動画の結果を返しつつ終了コード 1 になるエラー", func(t *testing.T) {
+		// Arrange
+		yt := listed()
+		yt.Playlists = []domain.Playlist{cliPlaylist("PL1", "Go 入門")}
+		yt.InsertResult = cliVideo("new1", "intro", "uploaded")
+		yt.AddToPlaylistErr = domain.Errorf(domain.KindQuota, "クォータ切れ")
+		u, _ := newUpload(yt, &usecasetest.Ledger{})
+
+		// Act
+		res, err := u.Run(ctx, video.UploadInput{Path: "/v/intro.mp4", PlaylistRef: "PL1"})
+
+		// Assert
+		if err == nil || domain.KindOf(err).ExitCode() != 1 || !strings.Contains(err.Error(), "--skip-existing") || !strings.Contains(err.Error(), "new1") {
+			t.Fatalf("err=%v", err)
+		}
+		if res.Video.ID != "new1" || res.Playlist.Done || !strings.Contains(res.Playlist.Error, "クォータ切れ") {
+			t.Errorf("res=%+v", res)
+		}
+	})
+
+	t.Run("サムネイルの設定に失敗しても再生リストには入れ、両方の結果を返す", func(t *testing.T) {
+		// Arrange
+		yt := listed()
+		yt.Playlists = []domain.Playlist{cliPlaylist("PL1", "Go 入門")}
+		yt.InsertResult = cliVideo("new1", "intro", "uploaded")
+		yt.ThumbnailErr = errors.New("forbidden")
+		u, _ := newUpload(yt, &usecasetest.Ledger{})
+
+		// Act
+		res, err := u.Run(ctx, video.UploadInput{Path: "/v/intro.mp4", ThumbnailPath: "/v/thumb.png", PlaylistRef: "PL1"})
+
+		// Assert
+		if err == nil || domain.KindOf(err).ExitCode() != 1 {
+			t.Fatalf("err=%v", err)
+		}
+		if res.Thumbnail.Done || !strings.Contains(res.Thumbnail.Error, "forbidden") || res.Playlist != (video.StepResult{Done: true}) {
+			t.Errorf("res=%+v", res)
+		}
+	})
+}

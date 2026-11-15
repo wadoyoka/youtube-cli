@@ -19,6 +19,7 @@ import (
 	"github.com/wadoyoka/youtube-cli/internal/repository/youtubeapi"
 	"github.com/wadoyoka/youtube-cli/internal/usecase"
 	"github.com/wadoyoka/youtube-cli/internal/usecase/account"
+	"github.com/wadoyoka/youtube-cli/internal/usecase/playlist"
 	"github.com/wadoyoka/youtube-cli/internal/usecase/setup"
 	"github.com/wadoyoka/youtube-cli/internal/usecase/video"
 )
@@ -59,7 +60,11 @@ func run(ctx context.Context) int {
 		List:      video.List{Remote: remote},
 		Upload:    video.Upload{Remote: remote, Open: localfile.Open},
 		Thumbnail: video.Thumbnail{Remote: remote, Open: localfile.Open},
-		Policy:    policy,
+		// playlist add は、動画がこのツールで上げたものかを video.Catalog で確かめる。
+		PlaylistList:   playlist.List{Remote: remote},
+		PlaylistCreate: playlist.Create{Remote: remote},
+		PlaylistAdd:    playlist.Add{Remote: remote, Videos: video.Catalog{Remote: remote}},
+		Policy:         policy,
 		Setup: setup.Setup{
 			Init:    initUC,
 			Policy:  policy,

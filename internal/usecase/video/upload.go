@@ -7,11 +7,13 @@ import (
 	"io"
 	"io/fs"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/wadoyoka/youtube-cli/internal/domain"
 	dv "github.com/wadoyoka/youtube-cli/internal/domain/video"
 	"github.com/wadoyoka/youtube-cli/internal/usecase"
+	"github.com/wadoyoka/youtube-cli/internal/usecase/playlist"
 )
 
 // Upload は、手元の動画を限定公開で上げる。
@@ -27,11 +29,12 @@ type UploadInput struct {
 	// Meta は、動画の項目。Title が空ならファイル名（拡張子を除く）、CategoryID が空なら既定のカテゴリにする。目印のタグは足す。
 	Meta          dv.Meta
 	ThumbnailPath string           // 上げたあとで設定するサムネイル。空なら設定しない
+	PlaylistRef   string           // 上げたあとで入れる、このツールで作った再生リスト（ID か名前）。空なら入れない
 	SkipExisting  bool             // 同じタイトルの CLI 動画があれば、上げずにそれを使う
 	Progress      func(sent int64) // 送り終えたバイト数を知らせる先。nil なら知らせない
 }
 
-// StepResult は、上げたあとの手順（サムネイルの設定など）の結果。行わなかったときは空。
+// StepResult は、上げたあとの手順（サムネイルの設定、再生リストへの追加）の結果。行わなかったときは空。
 type StepResult struct {
 	Done  bool
 	Error string
@@ -44,16 +47,19 @@ type UploadResult struct {
 	StudioURL string
 	Existing  bool // 上げずに、同じタイトルの既存の動画を使った
 	Thumbnail StepResult
+	Playlist  StepResult // すでに入っていて何もしなかったときも Done
 	Warnings  []string
 }
 
-// Run は、上げる前にすべてを確かめてから、動画を限定公開で上げ、サムネイルを設定する。
+// Run は、上げる前にすべてを確かめてから、動画を限定公開で上げ、サムネイルを設定し、再生リストに入れる。
 //  1. 項目（目印のタグを足したもの）、動画のファイル、サムネイルの形式と大きさを確かめる。失敗すれば何も上げない
-//  2. 同じタイトルの CLI 動画があれば KindConflict で止める。SkipExisting なら、使える既存の動画で残りの手順だけを行う
-//  3. 上げる。結果が分からない（domain.ErrUploadUncertain）ときは、送り直さずにそのまま返す
-//  4. 動画 ID を受け取ったら、すぐに ledger に記録する。記録できなくても、上げた動画は警告を付けて返す
-//  5. 限定公開で返ってこなければ警告する
-//  6. サムネイルを設定する。失敗しても動画は残るので、結果を返しつつ KindUnexpected のエラーにする
+//  2. 再生リストが、このツールで作った限定公開のものかを確かめる（playlist.Catalog.ResolveForAdd）。失敗すれば何も上げない
+//  3. 同じタイトルの CLI 動画があれば KindConflict で止める。SkipExisting なら、使える既存の動画で残りの手順だけを行う
+//  4. 上げる。結果が分からない（domain.ErrUploadUncertain）ときは、送り直さずにそのまま返す
+//  5. 動画 ID を受け取ったら、すぐに ledger に記録する。記録できなくても、上げた動画は警告を付けて返す
+//  6. 限定公開で返ってこなければ警告する
+//  7. サムネイルを設定し、再生リストに入れる（すでに入っていれば何もしない）。片方が失敗してももう片方は行う。
+//     失敗しても動画は残るので、結果を返しつつ KindUnexpected のエラーにする
 //
 // ledger のロックは、記録するときだけ取る（Catalog が自分でロックを取るので、その間は持たない）。
 func (u Upload) Run(ctx context.Context, in UploadInput) (UploadResult, error) {
@@ -86,6 +92,14 @@ func (u Upload) Run(ctx context.Context, in UploadInput) (UploadResult, error) {
 	if err != nil {
 		return UploadResult{}, err
 	}
+	var playlistID string // 上げたあとで入れる再生リスト。空なら入れない
+	if in.PlaylistRef != "" {
+		p, err := playlist.Catalog{Remote: u.Remote}.ResolveForAdd(ctx, s, in.PlaylistRef)
+		if err != nil {
+			return UploadResult{}, err
+		}
+		playlistID = p.ID
+	}
 	existing, warnings, err := u.sameTitle(ctx, s, meta.Title, in.SkipExisting)
 	if err != nil {
 		return UploadResult{}, err
@@ -108,13 +122,26 @@ func (u Upload) Run(ctx context.Context, in UploadInput) (UploadResult, error) {
 	}
 	res.URL, res.StudioURL = res.Video.URL(), res.Video.StudioURL()
 
-	if thumb != nil {
-		if err := s.YT.SetThumbnail(ctx, res.Video.ID, thumb, thumbMime); err != nil {
-			res.Thumbnail.Error = err.Error()
-			return res, domain.Errorf(domain.KindUnexpected,
-				"サムネイルを設定できませんでした（動画 %s は YouTube にあります）。同じコマンドに --skip-existing を付けてやり直すと、サムネイルの設定だけを行います", res.Video.ID).Wrap(err)
+	var failed []string
+	var errs []error
+	step := func(name string, err error) StepResult {
+		if err != nil {
+			failed, errs = append(failed, name), append(errs, err)
+			return StepResult{Error: err.Error()}
 		}
-		res.Thumbnail.Done = true
+		return StepResult{Done: true}
+	}
+	if thumb != nil {
+		res.Thumbnail = step("サムネイルの設定", s.YT.SetThumbnail(ctx, res.Video.ID, thumb, thumbMime))
+	}
+	if playlistID != "" {
+		_, err := playlist.AddIfAbsent(ctx, s.YT, playlistID, res.Video.ID)
+		res.Playlist = step("再生リストへの追加", err)
+	}
+	if len(failed) > 0 {
+		return res, domain.Errorf(domain.KindUnexpected,
+			"%sに失敗しました（動画 %s は YouTube にあります）。同じコマンドに --skip-existing を付けてやり直すと、上げずに残りの手順だけを行います",
+			strings.Join(failed, "と"), res.Video.ID).Wrap(errors.Join(errs...))
 	}
 	return res, nil
 }

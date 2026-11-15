@@ -57,7 +57,7 @@ func TestUploadCommand(t *testing.T) {
 		for k, want := range map[string]any{
 			"videoId": "new1", "title": "intro", "url": "https://youtu.be/new1",
 			"studioUrl": "https://studio.youtube.com/video/new1/edit", "privacyStatus": "unlisted",
-			"uploadStatus": "uploaded", "existing": false, "thumbnail": nil,
+			"uploadStatus": "uploaded", "existing": false, "thumbnail": nil, "playlist": nil,
 		} {
 			if v, ok := got[k]; !ok || v != want {
 				t.Errorf("%s = %v（あるか: %v）, want %v", k, v, ok, want)
@@ -192,6 +192,56 @@ func TestUploadCommand(t *testing.T) {
 		// Assert
 		if code != 0 || len(yt.Inserted) != 1 {
 			t.Errorf("code=%d inserted=%d stderr=%q", code, len(yt.Inserted), errb.String())
+		}
+	})
+
+	t.Run("既定の policy.toml では --playlist を付けると playlist-add で 7 になり、上げない", func(t *testing.T) {
+		// Arrange
+		d, out, errb, _ := newDeps(t)
+		d, yt := withUpload(d)
+		yt.Playlists = []domain.Playlist{{ID: "PL1", Title: "Go 入門", Description: dv.AddPlaylistMarker(""), PrivacyStatus: dv.PrivacyUnlisted}}
+		initAndClear(t, d, out, errb)
+
+		// Act
+		code := Execute(ctx, d, []string{"upload", "/v/intro.mp4", "--playlist", "Go 入門"})
+
+		// Assert
+		if code != 7 || len(yt.Calls) != 0 || !strings.Contains(errb.String(), "playlist-add") {
+			t.Errorf("code=%d calls=%v stderr=%q", code, yt.Calls, errb.String())
+		}
+	})
+
+	t.Run("playlist-add を許せば、上げたあとで再生リストに入れ、JSON の playlist.done が true", func(t *testing.T) {
+		// Arrange
+		d, out, errb, dir := newDeps(t)
+		d, yt := withUpload(d)
+		yt.Playlists = []domain.Playlist{{ID: "PL1", Title: "Go 入門", Description: dv.AddPlaylistMarker(""), PrivacyStatus: dv.PrivacyUnlisted}}
+		initAndClear(t, d, out, errb)
+		writePolicy(t, dir, "")
+
+		// Act
+		code := Execute(ctx, d, []string{"--json", "upload", "/v/intro.mp4", "--playlist", "Go 入門"})
+
+		// Assert
+		if code != 0 || !strings.Contains(out.String(), `"playlist":{"done":true}`) || len(yt.AddedToPlaylist) != 1 {
+			t.Errorf("code=%d out=%q stderr=%q", code, out.String(), errb.String())
+		}
+	})
+
+	t.Run("--playlist が公開の再生リストを指すと、上げる前に 7 で止まる", func(t *testing.T) {
+		// Arrange
+		d, out, errb, dir := newDeps(t)
+		d, yt := withUpload(d)
+		yt.Playlists = []domain.Playlist{{ID: "PL1", Title: "Go 入門", Description: dv.AddPlaylistMarker(""), PrivacyStatus: "public"}}
+		initAndClear(t, d, out, errb)
+		writePolicy(t, dir, "")
+
+		// Act
+		code := Execute(ctx, d, []string{"upload", "/v/intro.mp4", "--playlist", "Go 入門"})
+
+		// Assert
+		if code != 7 || len(yt.Inserted) != 0 || out.Len() != 0 {
+			t.Errorf("code=%d inserted=%d out=%q stderr=%q", code, len(yt.Inserted), out.String(), errb.String())
 		}
 	})
 

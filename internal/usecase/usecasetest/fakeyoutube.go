@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
 
 	"github.com/wadoyoka/youtube-cli/internal/domain"
 	"github.com/wadoyoka/youtube-cli/internal/domain/video"
@@ -27,6 +28,30 @@ type YouTube struct {
 
 	Thumbnails   []SetThumbnailCall // SetThumbnail に渡されたもの
 	ThumbnailErr error              // SetThumbnail が返すエラー
+
+	Playlists      []domain.Playlist // ListMyPlaylists が返す再生リスト
+	LatePlaylists  []domain.Playlist // 作った直後で、ListMyPlaylists にはまだ出ない再生リスト。GetPlaylists は Playlists とこれから探す
+	PlaylistsErr   error             // ListMyPlaylists が返すエラー
+	GotPlaylistIDs []string          // GetPlaylists に渡された ID
+
+	Created      []CreatePlaylistCall // CreatePlaylist に渡されたもの
+	CreateResult domain.Playlist      // CreatePlaylist が返す再生リスト
+	CreateErr    error                // CreatePlaylist が返すエラー（CreateResult より優先）
+
+	AddedToPlaylist  []AddToPlaylistCall // AddToPlaylist で入れたもの
+	AddToPlaylistErr error               // AddToPlaylist が返すエラー（入れない）
+}
+
+// CreatePlaylistCall は、CreatePlaylist に渡されたもの。
+type CreatePlaylistCall struct {
+	Title       string
+	Description string
+}
+
+// AddToPlaylistCall は、AddToPlaylist に渡されたもの。
+type AddToPlaylistCall struct {
+	PlaylistID string
+	VideoID    string
 }
 
 // InsertedVideo は、InsertVideo に渡されたもの。
@@ -106,6 +131,56 @@ func (f *YouTube) SetThumbnail(_ context.Context, videoID string, img io.Reader,
 	return f.ThumbnailErr
 }
 
+// ListMyPlaylists は、PlaylistsErr があればそれを、なければ Playlists を返す。
+func (f *YouTube) ListMyPlaylists(context.Context) ([]domain.Playlist, error) {
+	f.Calls = append(f.Calls, "ListMyPlaylists")
+	if f.PlaylistsErr != nil {
+		return nil, f.PlaylistsErr
+	}
+	return f.Playlists, nil
+}
+
+// GetPlaylists は、Playlists と LatePlaylists のうち ids にあるものを、ids の順に返す。
+func (f *YouTube) GetPlaylists(_ context.Context, ids []string) ([]domain.Playlist, error) {
+	f.Calls = append(f.Calls, "GetPlaylists")
+	f.GotPlaylistIDs = append(f.GotPlaylistIDs, ids...)
+	all := append(slices.Clone(f.Playlists), f.LatePlaylists...)
+	var out []domain.Playlist
+	for _, id := range ids {
+		for _, p := range all {
+			if p.ID == id {
+				out = append(out, p)
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+// CreatePlaylist は、渡されたものを記録し、CreateErr か CreateResult を返す。
+func (f *YouTube) CreatePlaylist(_ context.Context, title, description string) (domain.Playlist, error) {
+	f.Calls = append(f.Calls, "CreatePlaylist")
+	f.Created = append(f.Created, CreatePlaylistCall{Title: title, Description: description})
+	if f.CreateErr != nil {
+		return domain.Playlist{}, f.CreateErr
+	}
+	return f.CreateResult, nil
+}
+
+// AddToPlaylist は、AddToPlaylistErr がなければ、動画を PlaylistVideoIDs の再生リストの最後に入れて記録する。
+func (f *YouTube) AddToPlaylist(_ context.Context, playlistID, videoID string) error {
+	f.Calls = append(f.Calls, "AddToPlaylist")
+	if f.AddToPlaylistErr != nil {
+		return f.AddToPlaylistErr
+	}
+	if f.PlaylistVideoIDs == nil {
+		f.PlaylistVideoIDs = map[string][]string{}
+	}
+	f.PlaylistVideoIDs[playlistID] = append(f.PlaylistVideoIDs[playlistID], videoID)
+	f.AddedToPlaylist = append(f.AddedToPlaylist, AddToPlaylistCall{PlaylistID: playlistID, VideoID: videoID})
+	return nil
+}
+
 // Opener は、yt を返す YouTubeOpener を作る。
 func Opener(yt usecase.YouTube) usecase.YouTubeOpener {
 	return func(context.Context) (usecase.YouTube, error) { return yt, nil }
@@ -170,7 +245,7 @@ type Ledger struct {
 	PlaylistList []usecase.LedgerPlaylist
 	Clears       int   // Clear を呼んだ回数
 	ClearErr     error // Clear が返すエラー（空にしない）
-	AddErr       error // AddVideo が返すエラー（足さない）
+	AddErr       error // AddVideo と AddPlaylist が返すエラー（足さない）
 }
 
 // Videos は、記録した動画を返す。
@@ -195,6 +270,9 @@ func (l *Ledger) Playlists() ([]usecase.LedgerPlaylist, error) { return l.Playli
 
 // AddPlaylist は、同じ ID がなければ再生リストを足す。
 func (l *Ledger) AddPlaylist(p usecase.LedgerPlaylist) error {
+	if l.AddErr != nil {
+		return l.AddErr
+	}
 	for _, x := range l.PlaylistList {
 		if x.ID == p.ID {
 			return nil

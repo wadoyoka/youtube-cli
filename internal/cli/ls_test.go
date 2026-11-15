@@ -14,7 +14,8 @@ import (
 	"github.com/wadoyoka/youtube-cli/internal/usecase/video"
 )
 
-func withVideos(d Deps, vs ...domain.Video) Deps {
+// withVideos は、アップロード済みの再生リストに vs が並ぶ偽の YouTube を使う List を d に入れる。
+func withVideos(d Deps, vs ...domain.Video) (Deps, *usecasetest.YouTube) {
 	var idsList []string
 	for _, v := range vs {
 		idsList = append(idsList, v.ID)
@@ -30,7 +31,7 @@ func withVideos(d Deps, vs ...domain.Video) Deps {
 		Locker: &usecasetest.Locker{},
 		Ledger: &usecasetest.Ledger{},
 	}}
-	return d
+	return d, yt
 }
 
 func TestLsCommand(t *testing.T) {
@@ -41,7 +42,7 @@ func TestLsCommand(t *testing.T) {
 	t.Run("--json は id・title・url などの配列を出す", func(t *testing.T) {
 		// Arrange
 		d, out, errb, _ := newDeps(t)
-		d = withVideos(d, tagged)
+		d, _ = withVideos(d, tagged)
 		initAndClear(t, d, out, errb)
 
 		// Act
@@ -69,7 +70,7 @@ func TestLsCommand(t *testing.T) {
 	t.Run("--json は、目印だけのタグでも tags を配列で出す", func(t *testing.T) {
 		// Arrange
 		d, out, errb, _ := newDeps(t)
-		d = withVideos(d, domain.Video{ID: "v3", Title: "動画3", Tags: []string{dv.MarkerTag}})
+		d, _ = withVideos(d, domain.Video{ID: "v3", Title: "動画3", Tags: []string{dv.MarkerTag}})
 		initAndClear(t, d, out, errb)
 
 		// Act
@@ -84,7 +85,7 @@ func TestLsCommand(t *testing.T) {
 	t.Run("--json は、動画がなくても [] を出す", func(t *testing.T) {
 		// Arrange
 		d, out, errb, _ := newDeps(t)
-		d = withVideos(d, untagged)
+		d, _ = withVideos(d, untagged)
 		initAndClear(t, d, out, errb)
 
 		// Act
@@ -99,7 +100,7 @@ func TestLsCommand(t *testing.T) {
 	t.Run("人向けの出力は、タイトル・URL・状態を1行に出す", func(t *testing.T) {
 		// Arrange
 		d, out, errb, _ := newDeps(t)
-		d = withVideos(d, tagged)
+		d, _ = withVideos(d, tagged)
 		initAndClear(t, d, out, errb)
 
 		// Act
@@ -112,10 +113,29 @@ func TestLsCommand(t *testing.T) {
 		}
 	})
 
+	t.Run("--playlist は、その CLI 再生リストに入っている動画だけを出す", func(t *testing.T) {
+		// Arrange
+		d, out, errb, _ := newDeps(t)
+		other := domain.Video{ID: "v4", Title: "動画4", Tags: []string{dv.MarkerTag}, PrivacyStatus: "unlisted", UploadStatus: "processed", PublishedAt: published}
+		d, yt := withVideos(d, tagged, other)
+		yt.Playlists = []domain.Playlist{{ID: "PL1", Title: "Go 入門", Description: dv.AddPlaylistMarker("")}}
+		yt.PlaylistVideoIDs["PL1"] = []string{"v4"}
+		initAndClear(t, d, out, errb)
+
+		// Act
+		code := Execute(context.Background(), d, []string{"ls", "--playlist", "Go 入門"})
+
+		// Assert
+		want := "動画4\thttps://youtu.be/v4\tunlisted/processed\n"
+		if code != 0 || out.String() != want {
+			t.Errorf("code=%d out=%q want=%q stderr=%q", code, out.String(), want, errb.String())
+		}
+	})
+
 	t.Run("-l は ID・公開日時・タグを足す", func(t *testing.T) {
 		// Arrange
 		d, out, errb, _ := newDeps(t)
-		d = withVideos(d, tagged)
+		d, _ = withVideos(d, tagged)
 		initAndClear(t, d, out, errb)
 
 		// Act

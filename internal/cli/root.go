@@ -11,6 +11,7 @@ import (
 	"github.com/wadoyoka/youtube-cli/internal/domain"
 	"github.com/wadoyoka/youtube-cli/internal/usecase"
 	"github.com/wadoyoka/youtube-cli/internal/usecase/account"
+	"github.com/wadoyoka/youtube-cli/internal/usecase/playlist"
 	"github.com/wadoyoka/youtube-cli/internal/usecase/setup"
 	"github.com/wadoyoka/youtube-cli/internal/usecase/video"
 )
@@ -25,10 +26,14 @@ type Deps struct {
 	List      video.List
 	Upload    video.Upload
 	Thumbnail video.Thumbnail
-	Policy    usecase.PolicyStore
-	Stdin     io.Reader
-	Stdout    io.Writer
-	Stderr    io.Writer
+	// PlaylistList・PlaylistCreate・PlaylistAdd は、playlist ls・create・add。
+	PlaylistList   playlist.List
+	PlaylistCreate playlist.Create
+	PlaylistAdd    playlist.Add
+	Policy         usecase.PolicyStore
+	Stdin          io.Reader
+	Stdout         io.Writer
+	Stderr         io.Writer
 	// Interactive は、標準入力と標準エラーが両方とも端末なら true。
 	Interactive bool
 	// WindowsPaths は、Windows で動いているとき true。
@@ -38,8 +43,8 @@ type Deps struct {
 	// 後のタスクで、各 usecase のフィールドを足していく
 }
 
-// 拒否リストを確かめないコマンド。
-var unchecked = []string{"init", "setup", "help", "completion", "youtube-cli"}
+// 拒否リストを確かめないコマンド。playlist は子コマンドの入れ物で、それだけなら使い方を出す。
+var unchecked = []string{"init", "setup", "help", "completion", "youtube-cli", "playlist"}
 
 // Execute は、args を実行して終了コードを返す。
 func Execute(ctx context.Context, d Deps, args []string) int {
@@ -74,10 +79,11 @@ func newRootCommand(d Deps) *cobra.Command {
 		Args:          usageArgs(cobra.NoArgs),
 		RunE:          func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
-			if slices.Contains(unchecked, cmd.Name()) {
+			name := policyName(cmd)
+			if slices.Contains(unchecked, name) {
 				return nil
 			}
-			return checkPolicy(d, cmd.Name())
+			return checkPolicy(d, name)
 		},
 	}
 	root.SetIn(d.Stdin)
@@ -86,8 +92,17 @@ func newRootCommand(d Deps) *cobra.Command {
 	root.PersistentFlags().BoolVar(asJSON, "json", false, "結果を JSON で出す")
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usageError(err) })
 	root.AddCommand(newInitCommand(d, asJSON), newLoginCommand(d, asJSON), newLogoutCommand(d, asJSON),
-		newStatusCommand(d, asJSON), newSetupCommand(d, asJSON), newLsCommand(d, asJSON), newUploadCommand(d, asJSON), newThumbnailCommand(d, asJSON))
+		newStatusCommand(d, asJSON), newSetupCommand(d, asJSON), newLsCommand(d, asJSON), newUploadCommand(d, asJSON), newThumbnailCommand(d, asJSON),
+		newPlaylistCommand(d, asJSON))
 	return root
+}
+
+// policyName は、拒否リストで cmd を確かめるときの名前を返す。playlist の子コマンドは playlist-<名前>（playlist ls なら playlist-ls）。
+func policyName(cmd *cobra.Command) string {
+	if p := cmd.Parent(); p != nil && p.Name() == "playlist" {
+		return "playlist-" + cmd.Name()
+	}
+	return cmd.Name()
 }
 
 // checkPolicy は、policy.toml を読み、names のどれかが拒否されていれば KindDenied を返す。

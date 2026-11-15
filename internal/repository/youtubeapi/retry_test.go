@@ -61,7 +61,7 @@ func TestRetry(t *testing.T) {
 		c := &Client{attempts: 5, sleep: func(d time.Duration) { slept = append(slept, d) }}
 		calls := 0
 		// Act
-		err := c.retry(context.Background(), func() error { calls++; return &googleapi.Error{Code: 503} })
+		err := c.retry(context.Background(), isRetryable, func() error { calls++; return &googleapi.Error{Code: 503} })
 		// Assert
 		if err == nil || calls != 5 || len(slept) != 4 || slept[3] != 8*time.Second {
 			t.Errorf("err = %v, calls = %d, slept = %v", err, calls, slept)
@@ -73,7 +73,7 @@ func TestRetry(t *testing.T) {
 		c := &Client{attempts: 5, sleep: func(time.Duration) { t.Error("sleep が呼ばれた") }}
 		calls := 0
 		// Act
-		_ = c.retry(context.Background(), func() error { calls++; return &googleapi.Error{Code: 404} })
+		_ = c.retry(context.Background(), isRetryable, func() error { calls++; return &googleapi.Error{Code: 404} })
 		// Assert
 		if calls != 1 {
 			t.Errorf("calls = %d", calls)

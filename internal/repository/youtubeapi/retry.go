@@ -68,12 +68,12 @@ func isNetworkError(err error) bool {
 	return false
 }
 
-// retry は、fn が やり直せる失敗を返したとき、1s、2s、4s、8s と待って、最大 attempts 回まで呼ぶ。
-func (c *Client) retry(ctx context.Context, fn func() error) error {
+// retry は、fn が retryable の失敗を返したとき、1s、2s、4s、8s と待って、最大 attempts 回まで呼ぶ。
+func (c *Client) retry(ctx context.Context, retryable func(error) bool, fn func() error) error {
 	var err error
 	for attempt := 1; attempt <= c.attempts; attempt++ {
 		err = fn()
-		if err == nil || !isRetryable(err) || attempt == c.attempts {
+		if err == nil || !retryable(err) || attempt == c.attempts {
 			return err
 		}
 		if ctx.Err() != nil {

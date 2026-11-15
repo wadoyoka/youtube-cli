@@ -62,7 +62,13 @@ func NewOpener(a *auth.Auth) usecase.YouTubeOpener {
 
 // do は、fn をやり直しつきで呼び、エラーを変換する。
 func (c *Client) do(ctx context.Context, fn func() error) error {
-	return mapError(c.retry(ctx, fn))
+	return mapError(c.retry(ctx, isRetryable, fn))
+}
+
+// doCreate は、何かを作る fn を、混み合いで断られたとき（何も作られていない）だけやり直して呼び、エラーを変換する。
+// 5xx や通信の失敗は、YouTube が作ったあとで失敗したのかもしれないので、二重に作らないようやり直さない。
+func (c *Client) doCreate(ctx context.Context, fn func() error) error {
+	return mapError(c.retry(ctx, isRateLimited, fn))
 }
 
 // MyChannel は、ログイン中のチャンネルを返す。チャンネルがなければ KindSetup。
@@ -263,6 +269,102 @@ func (w *sendWatch) maybeCreated(err error) bool {
 	default:
 		return true
 	}
+}
+
+// playlistParts は、再生リストを引くときに頼む部分（名前と説明、公開範囲、動画の数）。
+var playlistParts = []string{"snippet", "status", "contentDetails"}
+
+// ListMyPlaylists は、ログイン中のチャンネルの再生リストを、全ページ分返す。
+func (c *Client) ListMyPlaylists(ctx context.Context) ([]domain.Playlist, error) {
+	return c.listPlaylists(ctx, func() *youtube.PlaylistsListCall {
+		return c.svc.Playlists.List(playlistParts).Mine(true)
+	})
+}
+
+// GetPlaylists は、ID の再生リストを50件ずつ引いて返す。見つからない ID は結果に入れない。
+func (c *Client) GetPlaylists(ctx context.Context, ids []string) ([]domain.Playlist, error) {
+	var playlists []domain.Playlist
+	for batch := range slices.Chunk(ids, pageSize) {
+		got, err := c.listPlaylists(ctx, func() *youtube.PlaylistsListCall {
+			return c.svc.Playlists.List(playlistParts).Id(batch...)
+		})
+		if err != nil {
+			return nil, err
+		}
+		playlists = append(playlists, got...)
+	}
+	return playlists, nil
+}
+
+// listPlaylists は、newCall で作った Playlists.List を、1回に pageSize 件ずつ、全ページ分たどる。
+func (c *Client) listPlaylists(ctx context.Context, newCall func() *youtube.PlaylistsListCall) ([]domain.Playlist, error) {
+	var playlists []domain.Playlist
+	pageToken := ""
+	for {
+		var resp *youtube.PlaylistListResponse
+		err := c.do(ctx, func() (err error) {
+			resp, err = newCall().MaxResults(pageSize).PageToken(pageToken).Context(ctx).Do()
+			return err
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, it := range resp.Items {
+			playlists = append(playlists, toPlaylist(it))
+		}
+		if resp.NextPageToken == "" {
+			return playlists, nil
+		}
+		pageToken = resp.NextPageToken
+	}
+}
+
+func toPlaylist(it *youtube.Playlist) domain.Playlist {
+	p := domain.Playlist{ID: it.Id}
+	if s := it.Snippet; s != nil {
+		p.Title, p.Description = s.Title, s.Description
+	}
+	if s := it.Status; s != nil {
+		p.PrivacyStatus = s.PrivacyStatus
+	}
+	if d := it.ContentDetails; d != nil {
+		p.ItemCount = d.ItemCount
+	}
+	return p
+}
+
+// CreatePlaylist は、限定公開の再生リストを作り、作った再生リストを返す。説明の最後に目印がなければ足す。
+// 混み合いで断られたとき（何も作られていない）だけ送り直す。5xx や通信の失敗は、作られたかもしれないので送り直さない。
+func (c *Client) CreatePlaylist(ctx context.Context, title, description string) (domain.Playlist, error) {
+	if !video.HasPlaylistMarker(description) {
+		description = video.AddPlaylistMarker(description)
+	}
+	pl := &youtube.Playlist{
+		Snippet: &youtube.PlaylistSnippet{Title: title, Description: description},
+		Status:  &youtube.PlaylistStatus{PrivacyStatus: video.PrivacyUnlisted},
+	}
+	var res *youtube.Playlist
+	err := c.doCreate(ctx, func() (err error) {
+		res, err = c.svc.Playlists.Insert([]string{"snippet", "status"}, pl).Context(ctx).Do()
+		return err
+	})
+	if err != nil {
+		return domain.Playlist{}, err
+	}
+	return toPlaylist(res), nil
+}
+
+// AddToPlaylist は、再生リストの最後に動画を入れる。
+// 混み合いで断られたとき（何も入っていない）だけ送り直す。5xx や通信の失敗は、入ったかもしれないので送り直さない。
+func (c *Client) AddToPlaylist(ctx context.Context, playlistID, videoID string) error {
+	item := &youtube.PlaylistItem{Snippet: &youtube.PlaylistItemSnippet{
+		PlaylistId: playlistID,
+		ResourceId: &youtube.ResourceId{Kind: "youtube#video", VideoId: videoID},
+	}}
+	return c.doCreate(ctx, func() error {
+		_, err := c.svc.PlaylistItems.Insert([]string{"snippet"}, item).Context(ctx).Do()
+		return err
+	})
 }
 
 // SetThumbnail は、動画のサムネイルを img にする。やり直すときに同じ画像を送れるよう、先に読み込む（画像は 2 MiB まで）。

@@ -681,3 +681,252 @@ func TestSetThumbnail(t *testing.T) {
 		}
 	})
 }
+
+// playlistJSON は、偽の YouTube が返す再生リスト。
+func playlistJSON(id, title, desc, privacy string, items int) map[string]any {
+	return map[string]any{
+		"id":             id,
+		"snippet":        map[string]any{"title": title, "description": desc},
+		"status":         map[string]any{"privacyStatus": privacy},
+		"contentDetails": map[string]any{"itemCount": items},
+	}
+}
+
+func TestListMyPlaylists(t *testing.T) {
+	t.Run("mine=true で全ページをたどり、再生リストの項目を変換して返す", func(t *testing.T) {
+		// Arrange
+		var queries []url.Values
+		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			queries = append(queries, r.URL.Query())
+			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Query().Get("pageToken") == "" {
+				_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{playlistJSON("PL1", "A", "説明\n\n[youtube-cli]", "unlisted", 3)}, "nextPageToken": "p2"})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{playlistJSON("PL2", "B", "", "public", 0)}})
+		})
+
+		// Act
+		got, err := c.ListMyPlaylists(context.Background())
+
+		// Assert
+		want := []domain.Playlist{
+			{ID: "PL1", Title: "A", Description: "説明\n\n[youtube-cli]", PrivacyStatus: "unlisted", ItemCount: 3},
+			{ID: "PL2", Title: "B", PrivacyStatus: "public"},
+		}
+		if err != nil || !slices.Equal(got, want) {
+			t.Fatalf("got=%+v err=%v", got, err)
+		}
+		q := queries[0]
+		if len(queries) != 2 || q.Get("mine") != "true" || q.Get("maxResults") != "50" || strings.Join(q["part"], ",") != "snippet,status,contentDetails" || queries[1].Get("pageToken") != "p2" {
+			t.Errorf("queries=%v", queries)
+		}
+	})
+
+	t.Run("403 のクォータ切れは KindQuota", func(t *testing.T) {
+		// Arrange
+		c := newTestClient(t, refused(http.StatusForbidden, "quotaExceeded"))
+
+		// Act
+		_, err := c.ListMyPlaylists(context.Background())
+
+		// Assert
+		if domain.KindOf(err) != domain.KindQuota {
+			t.Errorf("err=%v", err)
+		}
+	})
+}
+
+func TestGetPlaylists(t *testing.T) {
+	t.Run("ID を 50 件ずつ指定して引き、見つかったものを返す", func(t *testing.T) {
+		// Arrange
+		var batches []int
+		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			q := r.URL.Query()
+			batches = append(batches, len(q["id"]))
+			if strings.Join(q["part"], ",") != "snippet,status,contentDetails" || q.Get("mine") != "" {
+				t.Errorf("query=%v", q)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{playlistJSON(q["id"][0], "A", "", "unlisted", 1)}})
+		})
+		ids := make([]string, 60)
+		for i := range ids {
+			ids[i] = fmt.Sprintf("PL%02d", i)
+		}
+
+		// Act
+		got, err := c.GetPlaylists(context.Background(), ids)
+
+		// Assert
+		if err != nil || len(got) != 2 || got[0].ID != "PL00" || got[1].ID != "PL50" || got[0].ItemCount != 1 {
+			t.Fatalf("got=%+v err=%v", got, err)
+		}
+		if !slices.Equal(batches, []int{50, 10}) {
+			t.Errorf("batches=%v", batches)
+		}
+	})
+
+	t.Run("ID が空なら API を呼ばない", func(t *testing.T) {
+		// Arrange
+		var calls atomic.Int32
+		c := newTestClient(t, func(http.ResponseWriter, *http.Request) { calls.Add(1) })
+
+		// Act
+		got, err := c.GetPlaylists(context.Background(), nil)
+
+		// Assert
+		if err != nil || len(got) != 0 || calls.Load() != 0 {
+			t.Errorf("got=%v err=%v calls=%d", got, err, calls.Load())
+		}
+	})
+}
+
+// playlistServer は、再生リストを作る・動画を入れる要求に、responds の順で応える偽の YouTube。尽きたら最後のものを使う。
+type playlistServer struct {
+	mu       sync.Mutex
+	responds []http.HandlerFunc
+	got      []sentRequest
+	paths    []string
+}
+
+func (s *playlistServer) handle(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	s.mu.Lock()
+	s.got = append(s.got, sentRequest{header: r.Header.Clone(), query: r.URL.Query(), body: body})
+	s.paths = append(s.paths, r.Method+" "+r.URL.Path)
+	respond := s.responds[min(len(s.got), len(s.responds))-1]
+	s.mu.Unlock()
+	respond(w, r)
+}
+
+// respondJSON は、v を JSON で返す応答。
+func respondJSON(v any) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(v)
+	}
+}
+
+func TestCreatePlaylist(t *testing.T) {
+	t.Run("限定公開に固定し、説明の最後に目印を足して作り、作った再生リストを返す", func(t *testing.T) {
+		// Arrange
+		s := &playlistServer{responds: []http.HandlerFunc{respondJSON(playlistJSON("PLnew", "Go 入門", "Go を学ぶ\n\n[youtube-cli]", "unlisted", 0))}}
+		c := newTestClient(t, s.handle)
+
+		// Act
+		got, err := c.CreatePlaylist(context.Background(), "Go 入門", "Go を学ぶ")
+
+		// Assert
+		if err != nil || got.ID != "PLnew" || got.PrivacyStatus != "unlisted" || got.URL() != "https://www.youtube.com/playlist?list=PLnew" {
+			t.Fatalf("got=%+v err=%v", got, err)
+		}
+		if len(s.got) != 1 || s.paths[0] != "POST /youtube/v3/playlists" || strings.Join(s.got[0].query["part"], ",") != "snippet,status" {
+			t.Errorf("paths=%v query=%v", s.paths, s.got[0].query)
+		}
+		body := string(s.got[0].body)
+		if !strings.Contains(body, `"privacyStatus":"unlisted"`) || !strings.Contains(body, `"title":"Go 入門"`) || !strings.Contains(body, `"description":"Go を学ぶ\n\n[youtube-cli]"`) {
+			t.Errorf("body=%s", body)
+		}
+	})
+
+	t.Run("説明にすでに目印があれば重ねない", func(t *testing.T) {
+		// Arrange
+		s := &playlistServer{responds: []http.HandlerFunc{respondJSON(playlistJSON("PLnew", "A", "[youtube-cli]", "unlisted", 0))}}
+		c := newTestClient(t, s.handle)
+
+		// Act
+		_, err := c.CreatePlaylist(context.Background(), "A", "[youtube-cli]")
+
+		// Assert
+		if err != nil || !strings.Contains(string(s.got[0].body), `"description":"[youtube-cli]"`) {
+			t.Errorf("err=%v body=%s", err, s.got[0].body)
+		}
+	})
+
+	t.Run("429 で断られたら、何も作られていないので待って送り直す", func(t *testing.T) {
+		// Arrange
+		s := &playlistServer{responds: []http.HandlerFunc{refused(http.StatusTooManyRequests, "rateLimitExceeded"), respondJSON(playlistJSON("PLnew", "A", "[youtube-cli]", "unlisted", 0))}}
+		c := newTestClient(t, s.handle)
+
+		// Act
+		got, err := c.CreatePlaylist(context.Background(), "A", "")
+
+		// Assert
+		if err != nil || got.ID != "PLnew" || len(s.got) != 2 {
+			t.Errorf("got=%+v err=%v 要求=%d", got, err, len(s.got))
+		}
+	})
+
+	t.Run("503 は作られたかもしれないので送り直さない", func(t *testing.T) {
+		// Arrange
+		s := &playlistServer{responds: []http.HandlerFunc{refused(http.StatusServiceUnavailable, "backendError"), respondJSON(playlistJSON("PLnew", "A", "[youtube-cli]", "unlisted", 0))}}
+		c := newTestClient(t, s.handle)
+
+		// Act
+		_, err := c.CreatePlaylist(context.Background(), "A", "")
+
+		// Assert
+		if err == nil || len(s.got) != 1 {
+			t.Errorf("err=%v 要求=%d", err, len(s.got))
+		}
+	})
+}
+
+func TestAddToPlaylist(t *testing.T) {
+	t.Run("再生リストの ID と動画の ID を付けて入れる", func(t *testing.T) {
+		// Arrange
+		s := &playlistServer{responds: []http.HandlerFunc{respondJSON(map[string]any{"id": "item1"})}}
+		c := newTestClient(t, s.handle)
+
+		// Act
+		err := c.AddToPlaylist(context.Background(), "PL1", "vid1")
+
+		// Assert
+		if err != nil || len(s.got) != 1 || s.paths[0] != "POST /youtube/v3/playlistItems" || s.got[0].query.Get("part") != "snippet" {
+			t.Fatalf("err=%v paths=%v", err, s.paths)
+		}
+		var sent struct {
+			Snippet struct {
+				PlaylistID string `json:"playlistId"`
+				ResourceID struct {
+					Kind    string `json:"kind"`
+					VideoID string `json:"videoId"`
+				} `json:"resourceId"`
+			} `json:"snippet"`
+		}
+		if err := json.Unmarshal(s.got[0].body, &sent); err != nil {
+			t.Fatal(err)
+		}
+		if sent.Snippet.PlaylistID != "PL1" || sent.Snippet.ResourceID.Kind != "youtube#video" || sent.Snippet.ResourceID.VideoID != "vid1" {
+			t.Errorf("sent=%+v", sent)
+		}
+	})
+
+	t.Run("503 は入ったかもしれないので送り直さない", func(t *testing.T) {
+		// Arrange
+		s := &playlistServer{responds: []http.HandlerFunc{refused(http.StatusServiceUnavailable, "backendError"), respondJSON(map[string]any{"id": "item1"})}}
+		c := newTestClient(t, s.handle)
+
+		// Act
+		err := c.AddToPlaylist(context.Background(), "PL1", "vid1")
+
+		// Assert
+		if err == nil || len(s.got) != 1 {
+			t.Errorf("err=%v 要求=%d", err, len(s.got))
+		}
+	})
+
+	t.Run("404 は KindNotFound", func(t *testing.T) {
+		// Arrange
+		c := newTestClient(t, refused(http.StatusNotFound, "playlistNotFound"))
+
+		// Act
+		err := c.AddToPlaylist(context.Background(), "PL1", "vid1")
+
+		// Assert
+		if domain.KindOf(err) != domain.KindNotFound {
+			t.Errorf("err=%v", err)
+		}
+	})
+}

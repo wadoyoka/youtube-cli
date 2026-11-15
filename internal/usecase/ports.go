@@ -1,5 +1,5 @@
 // Package usecase は、各コマンドの手順が頼る外部の約束（ポート）と、どの手順も使う YouTube への接続を持つ。
-// 手順そのものは、サブパッケージ（account・setup）に置く。
+// 手順そのものは、サブパッケージ（account・setup・video・playlist）に置く。
 package usecase
 
 import (
@@ -73,6 +73,15 @@ type YouTube interface {
 	InsertVideo(ctx context.Context, m video.Meta, body io.Reader, size int64, progress func(sent int64)) (domain.Video, error)
 	// SetThumbnail は、動画のサムネイルを img（MIME タイプは mimeType）にする。
 	SetThumbnail(ctx context.Context, videoID string, img io.Reader, mimeType string) error
+	// ListMyPlaylists は、ログイン中のチャンネルの再生リストを、全ページ分返す。
+	ListMyPlaylists(ctx context.Context) ([]domain.Playlist, error)
+	// GetPlaylists は、ID の再生リストを返す。見つからない ID は結果に入れない。
+	GetPlaylists(ctx context.Context, ids []string) ([]domain.Playlist, error)
+	// CreatePlaylist は、限定公開の再生リストを作り、作った再生リストを返す。説明の最後に目印がなければ足す。
+	// 作られたかもしれない失敗（5xx や通信の失敗）では送り直さない。
+	CreatePlaylist(ctx context.Context, title, description string) (domain.Playlist, error)
+	// AddToPlaylist は、再生リストの最後に動画を入れる。入ったかもしれない失敗では送り直さない。
+	AddToPlaylist(ctx context.Context, playlistID, videoID string) error
 }
 
 // YouTubeOpener は、保存済みのトークンで YouTube を開く。

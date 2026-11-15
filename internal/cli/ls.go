@@ -23,12 +23,13 @@ type lsItem struct {
 
 func newLsCommand(d Deps, asJSON *bool) *cobra.Command {
 	long := new(bool)
+	playlistRef := new(string)
 	cmd := &cobra.Command{
 		Use:   "ls",
 		Short: "このツールで上げた動画を新しい順に表示する",
 		Args:  usageArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			videos, err := d.List.Run(cmd.Context(), video.ListInput{})
+			videos, err := d.List.Run(cmd.Context(), video.ListInput{PlaylistRef: *playlistRef})
 			if err != nil {
 				return err
 			}
@@ -60,5 +61,6 @@ func newLsCommand(d Deps, asJSON *bool) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVarP(long, "long", "l", false, "ID・公開日時・タグも表示する")
+	cmd.Flags().StringVar(playlistRef, "playlist", "", "このツールで作ったこの再生リスト（名前か ID）に入っている動画だけを表示する")
 	return cmd
 }

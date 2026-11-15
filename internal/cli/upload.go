@@ -23,10 +23,11 @@ type uploadJSON struct {
 	UploadStatus string    `json:"uploadStatus"`
 	Existing     bool      `json:"existing"`
 	Thumbnail    *stepJSON `json:"thumbnail"` // --thumbnail がなければ null
+	Playlist     *stepJSON `json:"playlist"`  // --playlist がなければ null
 	Warnings     []string  `json:"warnings"`
 }
 
-// stepJSON は、上げたあとの手順（サムネイルの設定など）の結果。
+// stepJSON は、上げたあとの手順（サムネイルの設定、再生リストへの追加）の結果。
 type stepJSON struct {
 	Done  bool   `json:"done"`
 	Error string `json:"error,omitempty"`
@@ -34,9 +35,9 @@ type stepJSON struct {
 
 // uploadFlags は、upload のフラグ。
 type uploadFlags struct {
-	title, description, descriptionFile, category, thumbnail string
-	tags                                                     []string
-	madeForKids, syntheticMedia, skipExisting                bool
+	title, description, descriptionFile, category, thumbnail, playlist string
+	tags                                                               []string
+	madeForKids, syntheticMedia, skipExisting                          bool
 }
 
 func newUploadCommand(d Deps, asJSON *bool) *cobra.Command {
@@ -46,8 +47,8 @@ func newUploadCommand(d Deps, asJSON *bool) *cobra.Command {
 		Short: "動画を限定公開で上げる",
 		Args:  usageArgs(cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if f.thumbnail != "" {
-				if err := checkPolicy(d, "thumbnail"); err != nil {
+			if names := f.policyNames(); len(names) > 0 {
+				if err := checkPolicy(d, names...); err != nil {
 					return err
 				}
 			}
@@ -55,7 +56,7 @@ func newUploadCommand(d Deps, asJSON *bool) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			in := video.UploadInput{Path: args[0], Meta: meta, ThumbnailPath: f.thumbnail, SkipExisting: f.skipExisting}
+			in := video.UploadInput{Path: args[0], Meta: meta, ThumbnailPath: f.thumbnail, PlaylistRef: f.playlist, SkipExisting: f.skipExisting}
 			var progress *progressPrinter
 			if d.Progress && !*asJSON {
 				progress = newProgressPrinter(d.Stderr)
@@ -67,7 +68,7 @@ func newUploadCommand(d Deps, asJSON *bool) *cobra.Command {
 			if res.Video.ID == "" {
 				return err
 			}
-			werr := writeUploadResult(d, *asJSON, res, f.thumbnail != "")
+			werr := writeUploadResult(d, *asJSON, res, f)
 			if err != nil {
 				return err
 			}
@@ -83,8 +84,22 @@ func newUploadCommand(d Deps, asJSON *bool) *cobra.Command {
 	fl.BoolVar(&f.madeForKids, "made-for-kids", false, "子ども向けとして申告する")
 	fl.BoolVar(&f.syntheticMedia, "synthetic-media", false, "改変・合成されたリアルなコンテンツとして申告する")
 	fl.StringVar(&f.thumbnail, "thumbnail", "", "上げたあとで設定するサムネイル（jpg か png、2 MiB まで）")
+	fl.StringVar(&f.playlist, "playlist", "", "上げたあとで入れる、このツールで作った限定公開の再生リスト（名前か ID）")
 	fl.BoolVar(&f.skipExisting, "skip-existing", false, "同じタイトルの CLI 動画があれば、上げずにそれを使い、残りの手順だけを行う")
 	return cmd
+}
+
+// policyNames は、フラグで行うほかの操作の、拒否リストの名前を返す（--thumbnail なら thumbnail、--playlist なら playlist-add）。
+// upload そのものはルートが確かめる。
+func (f uploadFlags) policyNames() []string {
+	var names []string
+	if f.thumbnail != "" {
+		names = append(names, "thumbnail")
+	}
+	if f.playlist != "" {
+		names = append(names, "playlist-add")
+	}
+	return names
 }
 
 // meta は、フラグから動画の項目を作る。--description と --description-file の同時指定は KindUsage。
@@ -120,10 +135,10 @@ func fileSize(path string) int64 {
 	return info.Size()
 }
 
-// writeUploadResult は、upload の結果を書く。thumbnail は --thumbnail を付けたかどうか。
+// writeUploadResult は、upload の結果を書く。JSON の thumbnail と playlist は、f でそのフラグを付けたときだけ出す（なければ null）。
 // JSON でなければ、警告を標準エラーに、「<uploaded か existing>\t<タイトル>\t<URL>\t<Studio の URL>」を標準出力に書く。
 // 失敗した手順は、エラーとして標準エラーに出るので、ここでは書かない。
-func writeUploadResult(d Deps, asJSON bool, res video.UploadResult, thumbnail bool) error {
+func writeUploadResult(d Deps, asJSON bool, res video.UploadResult, f uploadFlags) error {
 	if asJSON {
 		out := uploadJSON{
 			VideoID: res.Video.ID, Title: res.Video.Title, URL: res.URL, StudioURL: res.StudioURL,
@@ -133,8 +148,11 @@ func writeUploadResult(d Deps, asJSON bool, res video.UploadResult, thumbnail bo
 		if out.Warnings == nil {
 			out.Warnings = []string{}
 		}
-		if thumbnail {
+		if f.thumbnail != "" {
 			out.Thumbnail = &stepJSON{Done: res.Thumbnail.Done, Error: res.Thumbnail.Error}
+		}
+		if f.playlist != "" {
+			out.Playlist = &stepJSON{Done: res.Playlist.Done, Error: res.Playlist.Error}
 		}
 		return writeJSON(d.Stdout, out)
 	}

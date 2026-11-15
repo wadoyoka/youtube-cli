@@ -174,4 +174,46 @@ func TestList(t *testing.T) {
 			t.Errorf("got=%v err=%v", ids(got), err)
 		}
 	})
+
+	t.Run("PlaylistRef を指定すると、その CLI 再生リストに入っている CLI 動画だけを返す", func(t *testing.T) {
+		// Arrange
+		yt := &usecasetest.YouTube{
+			Channel: testChannel,
+			PlaylistVideoIDs: map[string][]string{
+				"UU1": {"a", "b", "c"},
+				"PL1": {"c", "a", "x"},
+			},
+			Videos: []domain.Video{
+				ours("a", "A", 1), ours("b", "B", 2), ours("c", "C", 3),
+				{ID: "x", Title: "他人", Tags: []string{"go"}},
+			},
+			Playlists: []domain.Playlist{{ID: "PL1", Title: "Go 入門", Description: dv.AddPlaylistMarker(""), PrivacyStatus: "public"}},
+		}
+		r := usecase.Remote{Open: usecasetest.Opener(yt), State: &usecasetest.State{Saved: testChannel, Found: true}, Ledger: &usecasetest.Ledger{}, Locker: &usecasetest.Locker{}}
+
+		// Act
+		got, err := video.List{Remote: r}.Run(context.Background(), video.ListInput{PlaylistRef: "Go 入門"})
+
+		// Assert
+		if err != nil || !slices.Equal(ids(got), []string{"c", "a"}) {
+			t.Errorf("got=%v err=%v", ids(got), err)
+		}
+	})
+
+	t.Run("PlaylistRef が CLI の再生リストでなければ KindNotFound", func(t *testing.T) {
+		// Arrange
+		yt := &usecasetest.YouTube{
+			Channel:   testChannel,
+			Playlists: []domain.Playlist{{ID: "PL1", Title: "手で作った", Description: "説明"}},
+		}
+		r := usecase.Remote{Open: usecasetest.Opener(yt), State: &usecasetest.State{Saved: testChannel, Found: true}, Ledger: &usecasetest.Ledger{}, Locker: &usecasetest.Locker{}}
+
+		// Act
+		_, err := video.List{Remote: r}.Run(context.Background(), video.ListInput{PlaylistRef: "PL1"})
+
+		// Assert
+		if domain.KindOf(err) != domain.KindNotFound {
+			t.Errorf("err=%v", err)
+		}
+	})
 }
