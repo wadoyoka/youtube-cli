@@ -53,9 +53,9 @@ YouTube へ限定公開だけで動画を上げる Go 製の CLI。gdrive-cli（
 | 層 | 置き場所 | 役割 | import してよい層 |
 |---|---|---|---|
 | cli | `internal/cli/` | cobra のコマンド定義、フラグの解釈、出力の整形、終了コードへの変換 | cli、usecase、domain |
-| usecase | `internal/usecase/` | 直下に `ports.go`（repository が満たすインターフェース）と、YouTube への接続。操作の手順はサブパッケージ（`account/`・`setup/`、のちに `video/`・`playlist/`）に1操作1ファイルで置く | usecase、domain |
-| domain | `internal/domain/` | 外部に触れない処理。直下はどの層も使うもの（エラーの種類、動画や再生リストの項目）。個別の決まりはサブパッケージ（`policy/`・`gcp/`・`configdir/`・`winpath/`、のちに `video/`） | domain |
-| repository | `internal/repository/` | 外部とのやりとり。相手ごとのサブパッケージ（`auth/`・`gcloud/`・`config/`・`browser/`・`atomicfile/`・`keychain/`・`terminal/`、のちに `youtubeapi/`）に置く | repository、usecase（ports）、domain |
+| usecase | `internal/usecase/` | 直下に `ports.go`（repository が満たすインターフェース）と `remote.go`（YouTube への接続）。操作の手順はサブパッケージ（`account/`・`setup/`・`video/`・`playlist/`）に1操作1ファイルで置く。偽物は `usecasetest/` | usecase、domain |
+| domain | `internal/domain/` | 外部に触れない処理。直下はどの層も使うもの（エラーの種類、動画や再生リストの項目）。個別の決まりはサブパッケージ（`policy/`・`gcp/`・`configdir/`・`winpath/`・`video/`） | domain |
+| repository | `internal/repository/` | 外部とのやりとり。相手ごとのサブパッケージ（`auth/`・`gcloud/`・`config/`・`browser/`・`atomicfile/`・`keychain/`・`terminal/`・`localfile/`・`youtubeapi/`）に置く。`localfile/` は上げる動画とサムネイルのファイルを開く、`youtubeapi/` は YouTube Data API | repository、usecase（ports）、domain |
 
 - 入口は `cmd/youtube-cli/main.go` の1つだけ。各層を組み立てるだけにする。
 - usecase・domain・repository は、層の中を関心ごとのサブパッケージに分ける。どのサブパッケージも使うものだけを層の直下に置き、直下からサブパッケージは import しない。新しいファイルは、関心の合うサブパッケージに置く。

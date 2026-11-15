@@ -10,7 +10,7 @@ youtube-cli を AI エージェント（Claude Code・Codex）から使うため
 
 | スキル | 概要 |
 |--------|------|
-| [youtube-cli](skills/youtube-cli/) | youtube-cli で YouTube へ限定公開の動画を上げ、サムネイル・再生リスト・一覧を扱う。ログインの確かめ方、`--json` の読み方、終了コードごとの止まり方を決めてある |
+| [youtube-cli](skills/youtube-cli/) | youtube-cli で YouTube へ限定公開の動画を上げ、サムネイル・再生リスト・一覧を扱う。ログインの確かめ方、`--json` の読み方、終了コードごとの止まり方、タイトルの付け方（`【動画シリーズ名】#.{No} 動画タイトル`）を決めてある |
 
 ## セットアップ
 
@@ -47,7 +47,8 @@ cd <このリポジトリ>/agents
 ## AI エージェントに使わせる前に
 
 - 自分で 1 回 `youtube-cli status` を実行する。macOS で youtube-cli を入れ直した直後は、キーチェーンのダイアログが出るので、人が許可しておく（[docs/setup.md](../docs/setup.md#鍵の置き場所)）。
-- させたくない操作は、拒否リスト（`policy.toml`）で止める（[docs/policy.md](../docs/policy.md)）。
+- させたくない操作は、拒否リスト（`policy.toml`）で止める（[docs/policy.md](../docs/policy.md)）。初期値では、再生リストの作成と追加（`playlist-create`・`playlist-add`）が止まっている。エージェントに再生リストを使わせるときは、人がこの 2 つを外す。
+- OAuth スコープ（`youtube.force-ssl`）は広いので、設定ディレクトリのファイル（トークンと鍵）をエージェントに渡さない（[docs/limitations.md](../docs/limitations.md)）。
 - エージェントから使うときの決まりの詳細は [docs/ai-agents.md](../docs/ai-agents.md)。
 
 ## ディレクトリ構成
