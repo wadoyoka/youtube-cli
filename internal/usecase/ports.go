@@ -1,0 +1,150 @@
+// Package usecase は、各コマンドの手順が頼る外部の約束（ポート）と、どの手順も使う YouTube への接続を持つ。
+// 手順そのものは、サブパッケージ（account・setup・video・playlist）に置く。
+package usecase
+
+import (
+	"context"
+	"io"
+	"time"
+
+	"github.com/wadoyoka/youtube-cli/internal/domain"
+	"github.com/wadoyoka/youtube-cli/internal/domain/policy"
+	"github.com/wadoyoka/youtube-cli/internal/domain/video"
+)
+
+// ConfigDir は、設定ディレクトリ。
+type ConfigDir interface {
+	Path() string
+	// Ensure は、なければ作る。作ったときだけ true を返す。
+	Ensure() (created bool, err error)
+}
+
+// PolicyStore は、拒否リストの置き場。
+type PolicyStore interface {
+	Path() string
+	// CreateIfAbsent は、なければ既定の内容で作る。作ったときだけ true を返す。
+	CreateIfAbsent() (created bool, err error)
+	Load() (policy.Policy, error)
+}
+
+// LoginOptions は、ログインの入出力。
+type LoginOptions struct {
+	NoBrowser bool
+	Prompt    io.Writer // URL と案内を書く先（標準エラー）
+	Input     io.Reader // --no-browser のとき、貼り付けを読む元（標準入力）。Login が戻ったあとも読み続けることがある。ほかと共有してよいのは、Login が戻ったあとに誰もその Reader から読まないときだけ（setup は質問役と共有するが、ログインのあとは何も読まない）
+}
+
+// AuthInspection は、保存したものが今の鍵で読めるかの結果。
+type AuthInspection struct {
+	KeyStore     string // "os" か "file"
+	ClientSecret bool   // client_secret.enc があり、今の鍵で読める
+	Token        bool   // token.enc があり、今の鍵で読める
+	Problem      string // 読めない理由。問題がなければ ""
+	ProjectID    string // 読めた client_secret.enc の installed.project_id。分からなければ ""。秘密は入れない
+}
+
+// Authenticator は、Google へのログインとトークンの置き場。
+type Authenticator interface {
+	HasClientSecret() bool
+	ImportClientSecret(path string) error
+	// ClientSecretProjectID は、path の JSON を検めて、installed.project_id を返す（保存はしない）。
+	// 読めない・形が違うときは ImportClientSecret と同じ KindUsage。project_id がなければ ""。
+	ClientSecretProjectID(path string) (string, error)
+	Login(ctx context.Context, opt LoginOptions) error
+	Logout(ctx context.Context) error
+	HasToken() bool
+	Inspect() (AuthInspection, error)
+	// SnapshotToken は、今の token.enc の中身を覚える。restore を呼ぶと、その中身に書き戻す（なかったときは消す）。
+	// login のあとでチャンネルが違うと分かったとき、新しいトークンを取り消すために使う。
+	SnapshotToken() (restore func() error, err error)
+}
+
+// YouTube は、usecase が使う YouTube の操作。
+type YouTube interface {
+	// MyChannel は、ログイン中のチャンネルを返す。チャンネルがなければ KindSetup。
+	MyChannel(ctx context.Context) (domain.Channel, error)
+	// ListPlaylistVideoIDs は、再生リストの動画の ID を、全ページ分返す。
+	ListPlaylistVideoIDs(ctx context.Context, playlistID string) ([]string, error)
+	// GetVideos は、ID の動画を返す。見つからない ID は結果に入れない。
+	GetVideos(ctx context.Context, ids []string) ([]domain.Video, error)
+	// InsertVideo は、body（size バイト）を限定公開の動画として上げ、作った動画を返す。目印のタグは必ず付ける。
+	// 進み具合は progress（nil なら知らせない）に、送り終えたバイト数で知らせる。
+	// 送り始めたあとで動画 ID を受け取れなかったときは、送り直さずに domain.ErrUploadUncertain を返す。
+	InsertVideo(ctx context.Context, m video.Meta, body io.Reader, size int64, progress func(sent int64)) (domain.Video, error)
+	// SetThumbnail は、動画のサムネイルを img（MIME タイプは mimeType）にする。
+	SetThumbnail(ctx context.Context, videoID string, img io.Reader, mimeType string) error
+	// ListMyPlaylists は、ログイン中のチャンネルの再生リストを、全ページ分返す。
+	ListMyPlaylists(ctx context.Context) ([]domain.Playlist, error)
+	// GetPlaylists は、ID の再生リストを返す。見つからない ID は結果に入れない。
+	GetPlaylists(ctx context.Context, ids []string) ([]domain.Playlist, error)
+	// CreatePlaylist は、限定公開の再生リストを作り、作った再生リストを返す。説明の最後に目印がなければ足す。
+	// 作られたかもしれない失敗（5xx や通信の失敗）では送り直さない。
+	CreatePlaylist(ctx context.Context, title, description string) (domain.Playlist, error)
+	// AddToPlaylist は、再生リストの最後に動画を入れる。入ったかもしれない失敗では送り直さない。
+	AddToPlaylist(ctx context.Context, playlistID, videoID string) error
+}
+
+// YouTubeOpener は、保存済みのトークンで YouTube を開く。
+type YouTubeOpener func(ctx context.Context) (YouTube, error)
+
+// StateStore は、state.json の置き場。
+type StateStore interface {
+	// Channel は、保存したチャンネルを返す。なければ found=false。
+	Channel() (ch domain.Channel, found bool, err error)
+	SetChannel(ch domain.Channel) error
+}
+
+// LedgerVideo は、この PC で上げた動画の記録。
+type LedgerVideo struct {
+	ID         string    `json:"id"`
+	Title      string    `json:"title"`
+	Size       int64     `json:"size"`
+	UploadedAt time.Time `json:"uploadedAt"`
+}
+
+// LedgerPlaylist は、この PC で作った再生リストの記録。
+type LedgerPlaylist struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
+// Ledger は、この PC で上げた動画と作った再生リストの手元の記録。
+// YouTube の一覧 API は作った直後のものを返すのが遅れることがあるため、その穴を埋めるために持つ。
+// 読み書きは Locker で囲む。
+type Ledger interface {
+	Videos() ([]LedgerVideo, error)
+	// AddVideo は、動画を記録する。同じ ID が記録済みなら何もしない。
+	AddVideo(v LedgerVideo) error
+	Playlists() ([]LedgerPlaylist, error)
+	// AddPlaylist は、再生リストを記録する。同じ ID が記録済みなら何もしない。
+	AddPlaylist(p LedgerPlaylist) error
+	// Clear は、記録をすべて消す。チャンネルを切り替えたときに使う。
+	Clear() error
+}
+
+// Locker は、ほかの youtube-cli と同時に書き込まないための排他ロック。
+type Locker interface {
+	Lock(ctx context.Context) (unlock func(), err error)
+}
+
+// CloudProject は、gcloud で見たプロジェクト。
+type CloudProject struct {
+	ID    string
+	State string // gcloud の lifecycleState のまま（"ACTIVE"、"DELETE_REQUESTED" など）
+}
+
+// CloudSetup は、setup が使う gcloud の操作。作る・有効にするだけで、消す操作は持たない。
+type CloudSetup interface {
+	Installed() bool
+	ActiveAccount(ctx context.Context) (string, error) // ログインしていなければ ""
+	DescribeProject(ctx context.Context, id string) (p CloudProject, found bool, err error)
+	CreateProject(ctx context.Context, id string) error // ID が使われていれば KindConflict
+	EnableYouTube(ctx context.Context, id string) error
+}
+
+// SetupPrompter は、setup が人に尋ねるための窓口。cli が実装する。
+type SetupPrompter interface {
+	Ask(question, def string) (string, error) // Enter だけなら def。入力の終わりは io.EOF
+	Confirm(question string) (bool, error)    // y/N。既定は false
+	Say(format string, args ...any)           // 案内を1行（標準エラー）
+}
