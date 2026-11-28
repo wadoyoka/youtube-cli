@@ -10,7 +10,7 @@ pnpm = "12.16.1"
 
 # Go 本体。go.mod の go ディレクティブと同じ版に揃える。
 # Renovate は両方を 1 つの PR（.github/renovate.json5 の go のグループ）で上げる。
-go = "1.27.3"
+go = "1.27.4"
 # Go のリンター。.golangci.yml（v2 形式）はこの版を前提に書く。
 # CI（.github/workflows/）の lint もこの版で動かす。
 golangci-lint = "2.15.0"
