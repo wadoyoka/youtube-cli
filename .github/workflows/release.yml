@@ -27,11 +27,11 @@ jobs:
           persist-credentials: false
 
       - name: Setup Node.js
-        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
         with:
           # mise 本体の版。書かないと mise-action がその日の新しい版を入れ、日によって CI の結果が変わりうる。
           # 上げるのは Renovate（.github/renovate.json5 の github actions のグループ）。
-          version: 2026.11.2
+          version: 2026.11.14
           install_args: node pnpm
 
       - name: Install dependencies

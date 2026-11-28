@@ -1,16 +1,16 @@
 [tools]
 # ローカル開発と CI（.github/workflows/）で同じバージョンを使う。
-node = "26.13.0"
-trivy = "0.76.1"
-lefthook = "2.2.2"
+node = "26.13.1"
+trivy = "0.76.2"
+lefthook = "2.2.3"
 
 # パッケージマネージャ。package.json の packageManager と同じ版に揃え、
 # ローカルと CI（.github/workflows/）でロックファイルの解決結果がずれないようにする。
-pnpm = "12.16.1"
+pnpm = "12.23.0"
 
 # Go 本体。go.mod の go ディレクティブと同じ版に揃える。
 # Renovate は両方を 1 つの PR（.github/renovate.json5 の go のグループ）で上げる。
-go = "1.27.3"
+go = "1.27.4"
 # Go のリンター。.golangci.yml（v2 形式）はこの版を前提に書く。
 # CI（.github/workflows/）の lint もこの版で動かす。
 golangci-lint = "2.15.0"

@@ -1,6 +1,6 @@
 module github.com/wadoyoka/youtube-cli
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/pelletier/go-toml/v2 v2.4.3
@@ -9,8 +9,8 @@ require (
 	golang.org/x/oauth2 v0.38.0
 	golang.org/x/sys v0.50.0
 	golang.org/x/term v0.48.0
-	golang.org/x/tools v0.52.0
-	google.golang.org/api v0.312.0
+	golang.org/x/tools v0.53.0
+	google.golang.org/api v0.317.0
 )
 
 require (
@@ -35,12 +35,12 @@ require (
 	go.opentelemetry.io/otel/log v1.47.0 // indirect
 	go.opentelemetry.io/otel/metric v1.47.0 // indirect
 	go.opentelemetry.io/otel/trace v1.47.0 // indirect
-	golang.org/x/crypto v0.58.0 // indirect
+	golang.org/x/crypto v0.59.0 // indirect
 	golang.org/x/mod v0.43.0 // indirect
-	golang.org/x/net v0.62.0 // indirect
+	golang.org/x/net v0.63.0 // indirect
 	golang.org/x/sync v0.25.0 // indirect
 	golang.org/x/text v0.44.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20261104224025-d1e00e9f33ab // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20261118221215-c8830f628b3f // indirect
 	google.golang.org/grpc v1.85.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 )
