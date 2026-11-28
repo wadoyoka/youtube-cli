@@ -20,10 +20,10 @@ jobs:
           fetch-depth: 0
 
       - name: Setup Node.js
-        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
         with:
           # mise 本体の版。書かないと mise-action がその日の新しい版を入れ、日によって CI の結果が変わりうる。
-          version: 2026.11.2
+          version: 2026.11.14
           install_args: node pnpm
 
       - name: Install dependencies
@@ -41,9 +41,9 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Setup toolchain
-        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
         with:
-          version: 2026.11.2
+          version: 2026.11.14
           install_args: go golangci-lint
 
       # Go のビルドキャッシュ・モジュール・golangci-lint の解析の結果を残し、依存を毎回コンパイルし直さないようにする。
@@ -95,9 +95,9 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Setup toolchain
-        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
         with:
-          version: 2026.11.2
+          version: 2026.11.14
           install_args: go
 
       - name: Read Go cache paths
@@ -127,9 +127,9 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Setup trivy
-        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
         with:
-          version: 2026.11.2
+          version: 2026.11.14
           install_args: trivy
 
       # 対象・重大度・除外ディレクトリは trivy.yaml に、秘密情報の規則は trivy-secret.yaml に書いてある。
